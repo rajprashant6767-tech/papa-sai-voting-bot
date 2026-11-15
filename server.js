@@ -464,10 +464,17 @@ bot.action(/^select_participant_(\d+)$/, async (ctx) => {
 
     await ctx.answerCbQuery("Participant selected!");
 
+    // UPDATED VOTE NUMBER PROMPT
     return ctx.reply(
+      "🗳️ DEMONS VOTING\n\n" +
       `Aapne select kiya: ${participant.display_name}\n\n` +
-      "Kitne Coins ke vote dena chahte hain?\n" +
-      "Coins ki sankhya number mein bhejein."
+      "1 Coin = 1 Vote\n" +
+      "Jitne Coins spend karoge, utne hi Votes milenge.\n\n" +
+      "Enter Vote Number\n\n" +
+      "Example: 10\n\n" +
+      "Example: 10 enter karne par 10 Coins deduct honge aur " +
+      `${participant.display_name} ko 10 Votes milenge.\n\n` +
+      "Enter your vote number below."
     );
 
   } catch (error) {
@@ -583,4 +590,4 @@ app.listen(PORT, async () => {
     }
   }
 });
-    
+                   
