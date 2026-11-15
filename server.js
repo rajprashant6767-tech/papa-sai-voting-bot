@@ -2,6 +2,7 @@
 const express = require("express");
 const { Telegraf, Markup } = require("telegraf");
 const { createClient } = require("@supabase/supabase-js");
+const QRCode = require("qrcode");
 
 const app = express();
 app.use(express.json());
@@ -21,6 +22,9 @@ const bot = new Telegraf(BOT_TOKEN);
 
 const ADMIN_IDS = ["7927224931", "8789888284"];
 
+const UPI_ID = "raj-prashant@fam";
+const ACCOUNT_NAME = "Prashant Raj";
+
 const CHANNELS = [
   {
     username: "@DEMONS_GIVEAWAY_2026_27",
@@ -35,6 +39,10 @@ const CHANNELS = [
 const pendingVotes = new Map();
 const pendingRegistrations = new Set();
 
+// Add Money states
+const pendingMoneyAmount = new Set();
+const pendingMoneyProof = new Map();
+
 const PARTICIPANTS_PER_PAGE = 20;
 
 function isAdmin(ctx) {
@@ -44,7 +52,9 @@ function isAdmin(ctx) {
 // USER KEYBOARD
 function userKeyboard() {
   return Markup.keyboard([
-    ["Register Now 📝", "Add Votes 🗳️"],
+    ["Add Money 💰"],
+    ["Register Now 📝"],
+    ["Add Votes 🗳️", "Check Balance 💳"],
     ["See All Participants 👥"]
   ]).resize();
 }
@@ -52,7 +62,9 @@ function userKeyboard() {
 // ADMIN KEYBOARD
 function adminKeyboard() {
   return Markup.keyboard([
-    ["Register Now 📝", "Add Votes 🗳️"],
+    ["Add Money 💰"],
+    ["Register Now 📝"],
+    ["Add Votes 🗳️", "Check Balance 💳"],
     ["See All Participants 👥"],
     ["Admin Panel ⚙️"]
   ]).resize();
@@ -100,7 +112,6 @@ async function getSettings() {
     .single();
 
   if (error) throw error;
-
   return data;
 }
 
@@ -221,7 +232,333 @@ async function deleteOldChannelPosts(participants) {
   }
 }
 
-// START - NO MEMBERSHIP REQUIRED
+// =====================================
+// ADD MONEY
+// =====================================
+
+// ADD MONEY BUTTON
+bot.hears("Add Money 💰", async (ctx) => {
+  try {
+    await saveUser(ctx);
+
+    pendingMoneyAmount.add(String(ctx.from.id));
+    pendingMoneyProof.delete(String(ctx.from.id));
+
+    return ctx.reply(
+      "💰 ADD MONEY\n\n" +
+      "Apna amount poore rupees mein enter karein.\n\n" +
+      "Minimum amount: ₹1\n" +
+      "Example: 1, 10, 50, 100\n\n" +
+      "Decimal amount allowed nahi hai.\n\n" +
+      "Cancel karne ke liye /cancel bhejein."
+    );
+  } catch (error) {
+    console.error("Add Money start error:", error);
+    return ctx.reply("Add Money start nahi ho paya.");
+  }
+});
+
+// CANCEL PENDING ACTION
+bot.command("cancel", async (ctx) => {
+  const id = String(ctx.from.id);
+
+  pendingMoneyAmount.delete(id);
+  pendingMoneyProof.delete(id);
+  pendingRegistrations.delete(id);
+  pendingVotes.delete(id);
+
+  return ctx.reply(
+    "Current process cancel kar diya gaya hai.",
+    isAdmin(ctx) ? adminKeyboard() : userKeyboard()
+  );
+});
+
+// GENERATE UPI QR
+async function sendPaymentQR(ctx, amount) {
+  const upiLink =
+    "upi://pay" +
+    `?pa=${encodeURIComponent(UPI_ID)}` +
+    `&pn=${encodeURIComponent(ACCOUNT_NAME)}` +
+    `&am=${encodeURIComponent(String(amount))}` +
+    "&cu=INR";
+
+  const qrBuffer = await QRCode.toBuffer(upiLink, {
+    type: "png",
+    width: 700,
+    margin: 2,
+    errorCorrectionLevel: "H"
+  });
+
+  await ctx.replyWithPhoto(
+    { source: qrBuffer },
+    {
+      caption:
+        "💰 PAYMENT QR CODE\n\n" +
+        `Account Name: ${ACCOUNT_NAME}\n` +
+        `UPI ID: ${UPI_ID}\n` +
+        `Amount: ₹${amount}\n\n` +
+        "QR scan karke exact amount pay karein.\n" +
+        "Payment ke baad payment screenshot yahan bhejein.\n\n" +
+        "⚠️ Screenshot payment confirmation nahi hai. Payment verify hone ke baad hi wallet credit hoga."
+    }
+  );
+}
+
+// CREATE PAYMENT REQUEST AFTER SCREENSHOT
+async function createMoneyRequest(ctx) {
+  const telegramId = String(ctx.from.id);
+  const amount = pendingMoneyProof.get(telegramId);
+
+  if (!amount) return;
+
+  const screenshot = ctx.message.photo;
+  const fileId = screenshot[screenshot.length - 1].file_id;
+
+  try {
+    const { data: request, error } = await supabase
+      .from("add_money_requests")
+      .insert({
+        telegram_id: telegramId,
+        amount: amount,
+        screenshot_file_id: fileId,
+        status: "pending"
+      })
+      .select("id, amount")
+      .single();
+
+    if (error) throw error;
+
+    pendingMoneyProof.delete(telegramId);
+
+    await ctx.reply(
+      "✅ PAYMENT REQUEST SUBMITTED\n\n" +
+      `Request ID: ${request.id}\n` +
+      `Amount: ₹${request.amount}\n\n` +
+      "Aapka screenshot dono admins ko bhej diya gaya hai.\n" +
+      "Payment verify hone ke baad wallet update hoga."
+    );
+
+    const userName = [
+      ctx.from.first_name,
+      ctx.from.last_name
+    ].filter(Boolean).join(" ") || "User";
+
+    const caption =
+      "💰 NEW ADD MONEY REQUEST\n\n" +
+      `Request ID: ${request.id}\n` +
+      `Name: ${userName}\n` +
+      `Telegram ID: ${telegramId}\n` +
+      `Username: @${ctx.from.username || "Not available"}\n` +
+      `Amount: ₹${request.amount}\n\n` +
+      "Receiving account mein payment verify karne ke baad hi approve karein.";
+
+    const keyboard = Markup.inlineKeyboard([
+      [
+        Markup.button.callback(
+          "✅ Approve",
+          `approve_money_${request.id}`
+        ),
+        Markup.button.callback(
+          "❌ Reject",
+          `reject_money_${request.id}`
+        )
+      ]
+    ]);
+
+    const results = await Promise.allSettled(
+      ADMIN_IDS.map(adminId =>
+        bot.telegram.sendPhoto(
+          adminId,
+          fileId,
+          {
+            caption,
+            ...keyboard
+          }
+        )
+      )
+    );
+
+    results.forEach((result, index) => {
+      if (result.status === "rejected") {
+        console.error(
+          "Admin notification failed:",
+          ADMIN_IDS[index],
+          result.reason
+        );
+      }
+    });
+
+  } catch (error) {
+    console.error("Create payment request error:", error);
+
+    return ctx.reply(
+      "Payment request submit nahi hua. Admin se contact karein."
+    );
+  }
+}
+
+// ADMIN APPROVE
+bot.action(/^approve_money_(\d+)$/, async (ctx) => {
+  if (!isAdmin(ctx)) {
+    return ctx.answerCbQuery("Access denied.", {
+      show_alert: true
+    });
+  }
+
+  const requestId = Number(ctx.match[1]);
+
+  try {
+    await ctx.answerCbQuery("Payment verify kar rahe hain...");
+
+    const result = await supabase.rpc(
+      "approve_add_money_request",
+      {
+        p_request_id: requestId,
+        p_admin_id: String(ctx.from.id)
+      }
+    );
+
+    if (result.error) throw result.error;
+
+    const data = result.data;
+
+    if (!data || !data.ok) {
+      return ctx.reply(
+        data?.error === "ALREADY_REVIEWED"
+          ? "Ye request pehle hi review ho chuki hai."
+          : "Request approve nahi hui."
+      );
+    }
+
+    await ctx.editMessageCaption(
+      (ctx.callbackQuery.message.caption || "") +
+      "\n\n✅ APPROVED BY ADMIN"
+    );
+
+    await bot.telegram.sendMessage(
+      (await supabase
+        .from("add_money_requests")
+        .select("telegram_id")
+        .eq("id", requestId)
+        .single()).data.telegram_id,
+      "✅ PAYMENT APPROVED\n\n" +
+      `Request ID: ${requestId}\n` +
+      `Wallet balance: ₹${data.new_balance}`
+    );
+
+    return ctx.reply(
+      `Request ${requestId} approved successfully.`
+    );
+
+  } catch (error) {
+    console.error("Approve payment error:", error);
+
+    return ctx.reply(
+      "Approval process mein error aaya. Database check karein."
+    );
+  }
+});
+
+// ADMIN REJECT
+bot.action(/^reject_money_(\d+)$/, async (ctx) => {
+  if (!isAdmin(ctx)) {
+    return ctx.answerCbQuery("Access denied.", {
+      show_alert: true
+    });
+  }
+
+  const requestId = Number(ctx.match[1]);
+
+  try {
+    await ctx.answerCbQuery("Request reject ho rahi hai...");
+
+    const result = await supabase.rpc(
+      "reject_add_money_request",
+      {
+        p_request_id: requestId,
+        p_admin_id: String(ctx.from.id)
+      }
+    );
+
+    if (result.error) throw result.error;
+
+    const data = result.data;
+
+    if (!data || !data.ok) {
+      return ctx.reply(
+        data?.error === "ALREADY_REVIEWED"
+          ? "Ye request pehle hi review ho chuki hai."
+          : "Request reject nahi hui."
+      );
+    }
+
+    await ctx.editMessageCaption(
+      (ctx.callbackQuery.message.caption || "") +
+      "\n\n❌ REJECTED BY ADMIN"
+    );
+
+    const { data: request, error } = await supabase
+      .from("add_money_requests")
+      .select("telegram_id")
+      .eq("id", requestId)
+      .single();
+
+    if (error) throw error;
+
+    await bot.telegram.sendMessage(
+      request.telegram_id,
+      "❌ PAYMENT REQUEST REJECTED\n\n" +
+      `Request ID: ${requestId}\n\n` +
+      "Agar aapne payment kiya hai, receiving account mein status verify karne ke liye admin se contact karein."
+    );
+
+    return ctx.reply(
+      `Request ${requestId} rejected.`
+    );
+
+  } catch (error) {
+    console.error("Reject payment error:", error);
+
+    return ctx.reply(
+      "Reject process mein error aaya."
+    );
+  }
+});
+
+// =====================================
+// CHECK BALANCE
+// =====================================
+
+bot.hears("Check Balance 💳", async (ctx) => {
+  try {
+    const telegramId = String(ctx.from.id);
+
+    const { data, error } = await supabase
+      .from("bot_users")
+      .select("coins")
+      .eq("telegram_id", telegramId)
+      .single();
+
+    if (error) throw error;
+
+    return ctx.reply(
+      "💳 YOUR WALLET BALANCE\n\n" +
+      `Available Balance: ₹${data.coins}\n\n` +
+      "1 rupee = 1 vote"
+    );
+
+  } catch (error) {
+    console.error("Balance error:", error);
+    return ctx.reply(
+      "Balance load nahi hua. Pehle /start karein."
+    );
+  }
+});
+
+// =====================================
+// START
+// =====================================
+
 bot.start(async (ctx) => {
   try {
     const fullName = await saveUser(ctx);
@@ -371,7 +708,7 @@ bot.hears("Back to Menu", async (ctx) => {
   }
 });
 
-// REGISTER NOW - ASK CUSTOM NAME
+// REGISTER NOW
 bot.hears("Register Now 📝", async (ctx) => {
   try {
     const settings = await getSettings();
@@ -490,7 +827,7 @@ bot.action(/^participants_page_(\d+)$/, async (ctx) => {
   }
 });
 
-// ADD VOTES - COIN VOTING
+// ADD VOTES
 bot.hears("Add Votes 🗳️", async (ctx) => {
   try {
     const { data: participants, error } = await supabase
@@ -512,9 +849,9 @@ bot.hears("Add Votes 🗳️", async (ctx) => {
     ]);
 
     return ctx.reply(
-      "🗳️ COIN VOTING\n\n" +
+      "🗳️ VOTING\n\n" +
       "Participant select karein.\n" +
-      "1 Coin = 1 Vote",
+      "₹1 = 1 Vote",
       Markup.inlineKeyboard(buttons)
     );
 
@@ -524,7 +861,7 @@ bot.hears("Add Votes 🗳️", async (ctx) => {
   }
 });
 
-// FREE VOTE FROM CHANNEL POST
+// FREE VOTE
 bot.action(/^free_vote_(\d+)$/, async (ctx) => {
   try {
     const participantId = Number(ctx.match[1]);
@@ -567,7 +904,7 @@ bot.action(/^free_vote_(\d+)$/, async (ctx) => {
   }
 });
 
-// SELECT PARTICIPANT FOR COIN VOTE
+// SELECT PARTICIPANT
 bot.action(/^select_participant_(\d+)$/, async (ctx) => {
   try {
     const participantId = Number(ctx.match[1]);
@@ -591,12 +928,11 @@ bot.action(/^select_participant_(\d+)$/, async (ctx) => {
     return ctx.reply(
       "🗳️ DEMONS VOTING\n\n" +
       `Aapne select kiya: ${participant.display_name}\n\n` +
-      "1 Coin = 1 Vote\n" +
-      "Jitne Coins spend karoge, utne hi Votes milenge.\n\n" +
-      "Enter Vote Number\n\n" +
+      "₹1 = 1 Vote\n" +
+      "Jitne rupees spend karoge, utne hi Votes milenge.\n\n" +
+      "Enter Vote Number.\n\n" +
       "Example: 10\n\n" +
-      `10 Coins se ${participant.display_name} ko 10 Votes milenge.\n\n` +
-      "Enter your vote number below."
+      `₹10 se ${participant.display_name} ko 10 Votes milenge.`
     );
 
   } catch (error) {
@@ -607,15 +943,59 @@ bot.action(/^select_participant_(\d+)$/, async (ctx) => {
   }
 });
 
+// HANDLE PAYMENT SCREENSHOT
+bot.on("photo", async (ctx) => {
+  const telegramId = String(ctx.from.id);
+
+  if (!pendingMoneyProof.has(telegramId)) return;
+
+  return createMoneyRequest(ctx);
+});
+
 // HANDLE USER TEXT
 bot.on("text", async (ctx) => {
   const telegramId = String(ctx.from.id);
   const text = ctx.message.text.trim();
 
+  if (text.startsWith("/")) return;
+
+  // ADD MONEY AMOUNT
+  if (pendingMoneyAmount.has(telegramId)) {
+    if (!/^[1-9]\d*$/.test(text)) {
+      return ctx.reply(
+        "❌ Invalid amount.\n\n" +
+        "Sirf poore rupees enter karein.\n" +
+        "Minimum ₹1.\n" +
+        "Example: 10"
+      );
+    }
+
+    const amount = Number(text);
+
+    if (!Number.isSafeInteger(amount)) {
+      return ctx.reply("Amount bahut bada hai. Chhota amount enter karein.");
+    }
+
+    try {
+      pendingMoneyAmount.delete(telegramId);
+      pendingMoneyProof.set(telegramId, amount);
+
+      await sendPaymentQR(ctx, amount);
+
+      return ctx.reply(
+        "📸 Ab payment ka screenshot bhejein.\n\n" +
+        "Screenshot bhejne ke baad request admins ko jayegi."
+      );
+
+    } catch (error) {
+      pendingMoneyProof.delete(telegramId);
+      console.error("QR generation error:", error);
+      return ctx.reply("QR generate nahi hua. Dobara try karein.");
+    }
+  }
+
   // CUSTOM REGISTRATION NAME
   if (pendingRegistrations.has(telegramId)) {
-    if (text.startsWith("/")) return;
-
     if (text.length < 2 || text.length > 50) {
       return ctx.reply("Naam 2 se 50 characters ke beech hona chahiye.");
     }
@@ -681,19 +1061,19 @@ bot.on("text", async (ctx) => {
     }
   }
 
-  // COIN VOTE AMOUNT
+  // VOTE AMOUNT
   if (!pendingVotes.has(telegramId)) return;
 
   const participantId = pendingVotes.get(telegramId);
 
   if (!/^[1-9]\d*$/.test(text)) {
-    return ctx.reply("Kripya Coins ki sahi positive sankhya bhejein.");
+    return ctx.reply("Kripya poori positive rupee amount bhejein.");
   }
 
   const coins = Number(text);
 
   if (!Number.isSafeInteger(coins)) {
-    return ctx.reply("Coin amount bahut bada hai. Sahi amount bhejein.");
+    return ctx.reply("Amount bahut bada hai. Sahi amount bhejein.");
   }
 
   try {
@@ -714,7 +1094,7 @@ bot.on("text", async (ctx) => {
       pendingVotes.delete(telegramId);
 
       const messages = {
-        "Insufficient coins": "Aapke paas itne Coins nahi hain.",
+        "Insufficient coins": "Aapke paas itna balance nahi hai.",
         "Voting is closed": "Voting abhi band hai.",
         "Participant not found": "Participant nahi mila.",
         "User not found": "Aapka account nahi mila."
@@ -732,7 +1112,7 @@ bot.on("text", async (ctx) => {
     return ctx.reply(
       "✅ VOTE SUCCESSFUL!\n\n" +
       `Votes added: ${data.votes_added}\n` +
-      `Remaining Coins: ${data.remaining_coins}`,
+      `Remaining Balance: ₹${data.remaining_coins}`,
       isAdmin(ctx) ? adminKeyboard() : userKeyboard()
     );
 
