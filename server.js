@@ -32,8 +32,8 @@ const CHANNELS = [
   }
 ];
 
-// Temporary pending vote selections
 const pendingVotes = new Map();
+const PARTICIPANTS_PER_PAGE = 20;
 
 function isAdmin(ctx) {
   return ADMIN_IDS.includes(String(ctx.from.id));
@@ -42,7 +42,8 @@ function isAdmin(ctx) {
 // USER KEYBOARD
 function userKeyboard() {
   return Markup.keyboard([
-    ["Register Now 📝", "Vote 🗳️"]
+    ["Register Now 📝", "Vote 🗳️"],
+    ["SEE ALL PARTICIPANTS 👥"]
   ]).resize();
 }
 
@@ -50,6 +51,7 @@ function userKeyboard() {
 function adminKeyboard() {
   return Markup.keyboard([
     ["Register Now 📝", "Vote 🗳️"],
+    ["SEE ALL PARTICIPANTS 👥"],
     ["Admin Panel ⚙️"]
   ]).resize();
 }
@@ -58,7 +60,7 @@ function adminKeyboard() {
 function adminPanelKeyboard() {
   return Markup.keyboard([
     ["Registration ON 🟢", "Registration OFF 🔴"],
-    ["Voting ON 🟢", "Voting OFF 🔴"],
+    ["START NEW 🔄"],
     ["Back to Menu"]
   ]).resize();
 }
@@ -136,7 +138,7 @@ async function saveUser(ctx) {
 async function getSettings() {
   const { data, error } = await supabase
     .from("voting_settings")
-    .select("registration_active, voting_active")
+    .select("registration_active")
     .eq("id", 1)
     .single();
 
@@ -167,6 +169,70 @@ async function showJoinScreen(ctx) {
     "Dono channels join karne ke baad Verify button dabayein.",
     keyboard
   );
+}
+
+// SHOW PARTICIPANTS
+async function showParticipants(ctx, page = 0, edit = false) {
+  const from = page * PARTICIPANTS_PER_PAGE;
+  const to = from + PARTICIPANTS_PER_PAGE - 1;
+
+  const { data: participants, error, count } = await supabase
+    .from("voting_participants")
+    .select("id, display_name, total_votes", { count: "exact" })
+    .order("total_votes", { ascending: false })
+    .order("id", { ascending: true })
+    .range(from, to);
+
+  if (error) throw error;
+
+  if (!count || !participants || participants.length === 0) {
+    const message = "Abhi koi participant registered nahi hai.";
+
+    if (edit) return ctx.editMessageText(message);
+
+    return ctx.reply(message);
+  }
+
+  const totalPages = Math.ceil(count / PARTICIPANTS_PER_PAGE);
+
+  let message =
+    "👥 ALL PARTICIPANTS\n\n" +
+    `Total Participants: ${count}\n` +
+    `Page: ${page + 1}/${totalPages}\n\n`;
+
+  participants.forEach((participant, index) => {
+    message +=
+      `${from + index + 1}. ${participant.display_name}\n` +
+      `Votes: ${participant.total_votes}\n\n`;
+  });
+
+  const navigation = [];
+
+  if (page > 0) {
+    navigation.push(
+      Markup.button.callback(
+        "⬅️ Previous",
+        `participants_page_${page - 1}`
+      )
+    );
+  }
+
+  if (page + 1 < totalPages) {
+    navigation.push(
+      Markup.button.callback(
+        "Next ➡️",
+        `participants_page_${page + 1}`
+      )
+    );
+  }
+
+  const keyboard = navigation.length
+    ? Markup.inlineKeyboard([navigation])
+    : undefined;
+
+  if (edit) return ctx.editMessageText(message, keyboard);
+
+  return ctx.reply(message, keyboard);
 }
 
 // START
@@ -223,7 +289,7 @@ bot.hears("Admin Panel ⚙️", async (ctx) => {
     return ctx.reply(
       "⚙️ DEMONS ADMIN PANEL\n\n" +
       `Registration: ${settings.registration_active ? "ON 🟢" : "OFF 🔴"}\n` +
-      `Voting: ${settings.voting_active ? "ON 🟢" : "OFF 🔴"}`,
+      "Voting: ALWAYS ON 🟢",
       adminPanelKeyboard()
     );
 
@@ -267,38 +333,83 @@ bot.hears("Registration OFF 🔴", async (ctx) => {
   return ctx.reply("Registration OFF ho gaya! 🔴", adminPanelKeyboard());
 });
 
-// VOTING ON
-bot.hears("Voting ON 🟢", async (ctx) => {
+// START NEW - CONFIRMATION
+bot.hears("START NEW 🔄", async (ctx) => {
   if (!isAdmin(ctx)) return ctx.reply("Access denied.");
 
-  const { error } = await supabase
-    .from("voting_settings")
-    .update({ voting_active: true })
-    .eq("id", 1);
+  try {
+    return ctx.reply(
+      "⚠️ START NEW VOTING ROUND\n\n" +
+      "Is action se:\n" +
+      "• Purane participants delete honge.\n" +
+      "• Purane vote records delete honge.\n" +
+      "• Vote debit wallet records delete honge.\n\n" +
+      "Users ke Coins aur payment records safe rahenge.\n\n" +
+      "Ye action undo nahi ho sakta.\n\n" +
+      "Kya aap naya round start karna chahte hain?",
+      Markup.inlineKeyboard([
+        [Markup.button.callback("✅ CONFIRM NEW ROUND", "confirm_new_round")],
+        [Markup.button.callback("❌ CANCEL", "cancel_new_round")]
+      ])
+    );
 
-  if (error) {
-    console.error(error);
-    return ctx.reply("Voting ON nahi hua.");
+  } catch (error) {
+    console.error("Start New confirmation error:", error);
+    return ctx.reply("Confirmation load nahi hua.");
   }
-
-  return ctx.reply("Voting ON ho gaya! 🟢", adminPanelKeyboard());
 });
 
-// VOTING OFF
-bot.hears("Voting OFF 🔴", async (ctx) => {
-  if (!isAdmin(ctx)) return ctx.reply("Access denied.");
-
-  const { error } = await supabase
-    .from("voting_settings")
-    .update({ voting_active: false })
-    .eq("id", 1);
-
-  if (error) {
-    console.error(error);
-    return ctx.reply("Voting OFF nahi hua.");
+// CANCEL NEW ROUND
+bot.action("cancel_new_round", async (ctx) => {
+  if (!isAdmin(ctx)) {
+    return ctx.answerCbQuery("Access denied.", { show_alert: true });
   }
 
-  return ctx.reply("Voting OFF ho gaya! 🔴", adminPanelKeyboard());
+  await ctx.answerCbQuery("Cancelled");
+
+  return ctx.editMessageText("START NEW cancel kar diya gaya hai.");
+});
+
+// CONFIRM NEW ROUND
+bot.action("confirm_new_round", async (ctx) => {
+  if (!isAdmin(ctx)) {
+    return ctx.answerCbQuery("Access denied.", { show_alert: true });
+  }
+
+  try {
+    await ctx.answerCbQuery("New round process ho raha hai...");
+
+    const { data, error } = await supabase.rpc(
+      "start_new_voting_round"
+    );
+
+    if (error) {
+      console.error("Start New RPC error:", error);
+      return ctx.editMessageText(
+        "New round start nahi hua. Admin logs check karein."
+      );
+    }
+
+    if (!data || !data.success) {
+      return ctx.editMessageText("New round start nahi hua.");
+    }
+
+    pendingVotes.clear();
+
+    return ctx.editMessageText(
+      "✅ NEW VOTING ROUND STARTED!\n\n" +
+      `Old participants deleted: ${data.deleted_participants}\n` +
+      `Old votes deleted: ${data.deleted_votes}\n` +
+      `Old vote wallet records deleted: ${data.deleted_wallet_records}\n\n` +
+      "Registration: ON 🟢\n" +
+      "Voting: ALWAYS ON 🟢\n\n" +
+      "Users ab naye round ke liye register kar sakte hain."
+    );
+
+  } catch (error) {
+    console.error("Confirm New Round error:", error);
+    return ctx.reply("Technical problem. Dobara try karein.");
+  }
 });
 
 // BACK TO MENU
@@ -385,17 +496,50 @@ bot.hears("Register Now 📝", async (ctx) => {
   }
 });
 
-// VOTE MENU
-bot.hears("Vote 🗳️", async (ctx) => {
+// SEE ALL PARTICIPANTS
+bot.hears("SEE ALL PARTICIPANTS 👥", async (ctx) => {
   try {
     if (!(await checkMembership(ctx.from.id))) {
       return await showJoinScreen(ctx);
     }
 
-    const settings = await getSettings();
+    return await showParticipants(ctx, 0);
 
-    if (!settings.voting_active) {
-      return ctx.reply("Voting abhi shuru nahi hui hai.");
+  } catch (error) {
+    console.error("Participants list error:", error);
+    return ctx.reply("Participants list load nahi hui.");
+  }
+});
+
+// PARTICIPANTS PAGINATION
+bot.action(/^participants_page_(\d+)$/, async (ctx) => {
+  try {
+    if (!(await checkMembership(ctx.from.id))) {
+      await ctx.answerCbQuery("Dono channels join karein.", {
+        show_alert: true
+      });
+      return await showJoinScreen(ctx);
+    }
+
+    const page = Number(ctx.match[1]);
+
+    await ctx.answerCbQuery();
+
+    return await showParticipants(ctx, page, true);
+
+  } catch (error) {
+    console.error("Participants page error:", error);
+    return ctx.answerCbQuery("List load nahi hui.", {
+      show_alert: true
+    });
+  }
+});
+
+// VOTE MENU - ALWAYS ON
+bot.hears("Vote 🗳️", async (ctx) => {
+  try {
+    if (!(await checkMembership(ctx.from.id))) {
+      return await showJoinScreen(ctx);
     }
 
     const { data: participants, error } = await supabase
@@ -438,14 +582,6 @@ bot.action(/^select_participant_(\d+)$/, async (ctx) => {
       return await showJoinScreen(ctx);
     }
 
-    const settings = await getSettings();
-
-    if (!settings.voting_active) {
-      return ctx.answerCbQuery("Voting band hai.", {
-        show_alert: true
-      });
-    }
-
     const participantId = Number(ctx.match[1]);
 
     const { data: participant, error } = await supabase
@@ -464,7 +600,6 @@ bot.action(/^select_participant_(\d+)$/, async (ctx) => {
 
     await ctx.answerCbQuery("Participant selected!");
 
-    // UPDATED VOTE NUMBER PROMPT
     return ctx.reply(
       "🗳️ DEMONS VOTING\n\n" +
       `Aapne select kiya: ${participant.display_name}\n\n` +
@@ -590,4 +725,3 @@ app.listen(PORT, async () => {
     }
   }
 });
-                   
