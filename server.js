@@ -23,21 +23,36 @@ const supabase = createClient(
 
 const bot = new Telegraf(BOT_TOKEN);
 
-// Telegram Channels
+// Channel usernames
 const CHANNELS = [
   {
-    name: "DEMONS GIVEAWAY 2026-27",
     username: "@DEMONS_GIVEAWAY_2026_27",
     link: "https://t.me/DEMONS_GIVEAWAY_2026_27"
   },
   {
-    name: "ZyloBet",
     username: "@ZyloBet",
     link: "https://t.me/ZyloBet"
   }
 ];
 
-// Check both channel memberships
+// Get actual Telegram channel names
+async function getChannelDetails() {
+  const details = [];
+
+  for (const channel of CHANNELS) {
+    const chat = await bot.telegram.getChat(channel.username);
+
+    details.push({
+      title: chat.title,
+      username: channel.username,
+      link: channel.link
+    });
+  }
+
+  return details;
+}
+
+// Check membership of both channels
 async function checkMembership(telegramId) {
   for (const channel of CHANNELS) {
     const member = await bot.telegram.getChatMember(
@@ -49,15 +64,13 @@ async function checkMembership(telegramId) {
       ["creator", "administrator", "member"].includes(member.status) ||
       (member.status === "restricted" && member.is_member === true);
 
-    if (!joined) {
-      return false;
-    }
+    if (!joined) return false;
   }
 
   return true;
 }
 
-// Save verified user in Supabase
+// Save user in Supabase
 async function saveUser(ctx) {
   const telegramId = String(ctx.from.id);
 
@@ -68,21 +81,15 @@ async function saveUser(ctx) {
 
   const { error } = await supabase
     .from("bot_users")
-    .upsert(
-      {
-        telegram_id: telegramId,
-        username: ctx.from.username || null,
-        full_name: fullName
-      },
-      {
-        onConflict: "telegram_id"
-      }
-    );
+    .upsert({
+      telegram_id: telegramId,
+      username: ctx.from.username || null,
+      full_name: fullName
+    }, {
+      onConflict: "telegram_id"
+    });
 
-  if (error) {
-    console.error("User save error:", error);
-    throw error;
-  }
+  if (error) throw error;
 
   return fullName || "User";
 }
@@ -102,19 +109,21 @@ async function showWelcome(ctx) {
   }
 }
 
-// Channel buttons - only channel names
-function joinKeyboard() {
+// Keyboard with actual Telegram channel titles
+async function joinKeyboard() {
+  const channels = await getChannelDetails();
+
   return Markup.inlineKeyboard([
     [
       Markup.button.url(
-        "DEMONS GIVEAWAY 2026-27",
-        CHANNELS[0].link
+        channels[0].title,
+        channels[0].link
       )
     ],
     [
       Markup.button.url(
-        "ZyloBet",
-        CHANNELS[1].link
+        channels[1].title,
+        channels[1].link
       )
     ],
     [
@@ -126,14 +135,16 @@ function joinKeyboard() {
   ]);
 }
 
-// Show channel screen
+// Show channel joining screen
 async function showJoinScreen(ctx) {
+  const keyboard = await joinKeyboard();
+
   const message =
     "Welcome to DEMONS VOTING BOT!\n\n" +
     "Bot use karne ke liye dono Telegram channels join karein.\n\n" +
     "Dono channels join karne ke baad Verify button dabayein.";
 
-  return ctx.reply(message, joinKeyboard());
+  return ctx.reply(message, keyboard);
 }
 
 // Start command
@@ -151,12 +162,12 @@ bot.start(async (ctx) => {
     console.error("Start error:", error);
 
     return ctx.reply(
-      "Membership check nahi ho paya. Thodi der baad /start karein."
+      "Channel check nahi ho paya. Bot ko dono channels mein Admin banayein aur dobara /start karein."
     );
   }
 });
 
-// Verify membership button
+// Verify membership
 bot.action("verify_membership", async (ctx) => {
   try {
     const joined = await checkMembership(ctx.from.id);
@@ -176,19 +187,19 @@ bot.action("verify_membership", async (ctx) => {
 
     try {
       await ctx.answerCbQuery(
-        "Verification mein problem hai. Dobara try karein.",
+        "Verification failed. Dobara try karein.",
         { show_alert: true }
       );
     } catch (_) {}
   }
 });
 
-// Home page
+// Home
 app.get("/", (req, res) => {
   res.send("DEMONS VOTING BOT is running");
 });
 
-// Health check
+// Health
 app.get("/health", (req, res) => {
   res.json({ ok: true });
 });
@@ -216,7 +227,8 @@ app.listen(PORT, async () => {
 
       console.log("Telegram webhook configured");
     } catch (error) {
-      console.error("Webhook setup error:", error);
+      console.error("Webhook error:", error);
     }
   }
 });
+      
