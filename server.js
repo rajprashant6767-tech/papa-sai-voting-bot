@@ -785,4 +785,120 @@ bot.on("text", async (ctx) => {
 
       return ctx.reply(
         publishError
-          ? "Registration successful hai, lekin channel pos
+          ? "Registration successful hai, lekin channel post mein problem aayi. Admin se contact karein."
+          : "🎉 Registration successful!\n\n" +
+            `Name: ${text}\n` +
+            `Telegram ID: ${telegramId}\n\n` +
+            "Dono channels par aapka post publish ho gaya hai.",
+        isAdmin(ctx) ? adminKeyboard() : userKeyboard()
+      );
+
+    } catch (error) {
+      console.error("Custom registration error:", error);
+      return ctx.reply("Registration nahi ho paya. Dobara try karein.");
+    }
+  }
+
+  // COIN VOTE AMOUNT
+  if (!pendingVotes.has(telegramId)) return;
+
+  const participantId = pendingVotes.get(telegramId);
+
+  if (!/^[1-9]\d*$/.test(text)) {
+    return ctx.reply("Kripya Coins ki sahi positive sankhya bhejein.");
+  }
+
+  const coins = Number(text);
+
+  if (!Number.isSafeInteger(coins)) {
+    return ctx.reply("Coin amount bahut bada hai. Sahi amount bhejein.");
+  }
+
+  try {
+    if (!(await checkMembership(ctx.from.id))) {
+      pendingVotes.delete(telegramId);
+      return await showJoinScreen(ctx);
+    }
+
+    const result = await supabase.rpc("cast_voting_coins", {
+      p_voter_telegram_id: telegramId,
+      p_participant_id: participantId,
+      p_coins: coins
+    });
+
+    if (result.error) {
+      console.error("Vote RPC error:", result.error);
+      return ctx.reply("Vote process nahi ho paya. Admin se contact karein.");
+    }
+
+    const data = result.data;
+
+    if (!data || !data.success) {
+      pendingVotes.delete(telegramId);
+
+      const messages = {
+        "Insufficient coins": "Aapke paas itne Coins nahi hain.",
+        "Voting is closed": "Voting abhi band hai.",
+        "Participant not found": "Participant nahi mila.",
+        "User not found": "Aapka account nahi mila."
+      };
+
+      return ctx.reply(
+        messages[data?.message] || data?.message || "Vote nahi laga."
+      );
+    }
+
+    pendingVotes.delete(telegramId);
+
+    await updateChannelVoteCounts(participantId);
+
+    return ctx.reply(
+      "✅ VOTE SUCCESSFUL!\n\n" +
+      `Votes added: ${data.votes_added}\n` +
+      `Remaining Coins: ${data.remaining_coins}`,
+      isAdmin(ctx) ? adminKeyboard() : userKeyboard()
+    );
+
+  } catch (error) {
+    console.error("Vote processing error:", error);
+    return ctx.reply("Technical problem. Dobara try karein.");
+  }
+});
+
+// HOME
+app.get("/", (req, res) => {
+  res.send("DEMONS VOTING BOT is running");
+});
+
+// HEALTH
+app.get("/health", (req, res) => {
+  res.json({ ok: true });
+});
+
+// WEBHOOK
+app.post("/telegram", async (req, res) => {
+  try {
+    await bot.handleUpdate(req.body);
+    res.sendStatus(200);
+  } catch (error) {
+    console.error("Webhook error:", error);
+    res.sendStatus(500);
+  }
+});
+
+// SERVER START
+app.listen(PORT, async () => {
+  console.log(`DEMONS VOTING BOT running on port ${PORT}`);
+
+  if (APP_URL) {
+    try {
+      await bot.telegram.setWebhook(
+        `${APP_URL.replace(/\/$/, "")}/telegram`
+      );
+
+      console.log("Webhook configured");
+    } catch (error) {
+      console.error("Webhook setup error:", error);
+    }
+  }
+});
