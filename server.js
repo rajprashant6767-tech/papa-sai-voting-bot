@@ -19,10 +19,8 @@ if (!BOT_TOKEN || !SUPABASE_URL || !SUPABASE_SECRET_KEY) {
 const supabase = createClient(SUPABASE_URL, SUPABASE_SECRET_KEY);
 const bot = new Telegraf(BOT_TOKEN);
 
-// Admin Telegram IDs
 const ADMIN_IDS = ["7927224931", "8789888284"];
 
-// Telegram channels
 const CHANNELS = [
   {
     username: "@DEMONS_GIVEAWAY_2026_27",
@@ -38,7 +36,30 @@ function isAdmin(ctx) {
   return ADMIN_IDS.includes(String(ctx.from.id));
 }
 
-// Check channel membership
+// USER BOTTOM KEYBOARD
+function userKeyboard() {
+  return Markup.keyboard([
+    ["Register Now 📝", "Vote 🗳️"]
+  ]).resize();
+}
+
+// ADMIN BOTTOM KEYBOARD
+function adminKeyboard() {
+  return Markup.keyboard([
+    ["Register Now 📝", "Vote 🗳️"],
+    ["Admin Panel ⚙️"]
+  ]).resize();
+}
+
+// ADMIN PANEL BOTTOM KEYBOARD
+function adminPanelKeyboard() {
+  return Markup.keyboard([
+    ["Registration ON 🟢", "Registration OFF 🔴"],
+    ["Back to Menu"]
+  ]).resize();
+}
+
+// CHECK MEMBERSHIP
 async function checkMembership(telegramId) {
   for (const channel of CHANNELS) {
     const member = await bot.telegram.getChatMember(
@@ -56,72 +77,7 @@ async function checkMembership(telegramId) {
   return true;
 }
 
-// Save user
-async function saveUser(ctx) {
-  const telegramId = String(ctx.from.id);
-
-  const fullName = [
-    ctx.from.first_name,
-    ctx.from.last_name
-  ].filter(Boolean).join(" ");
-
-  const { error } = await supabase
-    .from("bot_users")
-    .upsert({
-      telegram_id: telegramId,
-      username: ctx.from.username || null,
-      full_name: fullName
-    }, {
-      onConflict: "telegram_id"
-    });
-
-  if (error) throw error;
-
-  return fullName || "User";
-}
-
-// Get registration setting
-async function getRegistrationStatus() {
-  const { data, error } = await supabase
-    .from("voting_settings")
-    .select("registration_active")
-    .eq("id", 1)
-    .single();
-
-  if (error) throw error;
-
-  return data.registration_active;
-}
-
-// Main menu
-async function showMainMenu(ctx, fullName) {
-  const active = await getRegistrationStatus();
-
-  const buttons = [];
-
-  if (active) {
-    buttons.push([
-      Markup.button.callback("Register Now", "register_now")
-    ]);
-  }
-
-  if (isAdmin(ctx)) {
-    buttons.push([
-      Markup.button.callback("Admin Panel", "admin_panel")
-    ]);
-  }
-
-  const message =
-    `Welcome ${fullName}!\n\n` +
-    "DEMONS VOTING BOT mein aapka swagat hai.";
-
-  return ctx.reply(
-    message,
-    buttons.length ? Markup.inlineKeyboard(buttons) : undefined
-  );
-}
-
-// Get actual Telegram channel titles
+// GET CHANNEL TITLES
 async function getChannelDetails() {
   const details = [];
 
@@ -137,7 +93,7 @@ async function getChannelDetails() {
   return details;
 }
 
-// Join keyboard
+// JOIN KEYBOARD
 async function joinKeyboard() {
   const channels = await getChannelDetails();
 
@@ -149,15 +105,61 @@ async function joinKeyboard() {
       Markup.button.url(channels[1].title, channels[1].link)
     ],
     [
-      Markup.button.callback(
-        "Verify Membership",
-        "verify_membership"
-      )
+      Markup.button.callback("Verify Membership", "verify_membership")
     ]
   ]);
 }
 
-// Show join screen
+// SAVE USER
+async function saveUser(ctx) {
+  const telegramId = String(ctx.from.id);
+
+  const fullName = [
+    ctx.from.first_name,
+    ctx.from.last_name
+  ].filter(Boolean).join(" ") || "User";
+
+  const { error } = await supabase
+    .from("bot_users")
+    .upsert({
+      telegram_id: telegramId,
+      username: ctx.from.username || null,
+      full_name: fullName
+    }, {
+      onConflict: "telegram_id"
+    });
+
+  if (error) throw error;
+
+  return fullName;
+}
+
+// REGISTRATION STATUS
+async function getRegistrationStatus() {
+  const { data, error } = await supabase
+    .from("voting_settings")
+    .select("registration_active")
+    .eq("id", 1)
+    .single();
+
+  if (error) throw error;
+
+  return data.registration_active;
+}
+
+// SHOW MAIN MENU
+async function showMainMenu(ctx, fullName) {
+  const message =
+    `Welcome ${fullName}!\n\n` +
+    "DEMONS VOTING BOT mein aapka swagat hai.";
+
+  return ctx.reply(
+    message,
+    isAdmin(ctx) ? adminKeyboard() : userKeyboard()
+  );
+}
+
+// SHOW JOIN SCREEN
 async function showJoinScreen(ctx) {
   const keyboard = await joinKeyboard();
 
@@ -169,7 +171,7 @@ async function showJoinScreen(ctx) {
   );
 }
 
-// Start command
+// START
 bot.start(async (ctx) => {
   try {
     const joined = await checkMembership(ctx.from.id);
@@ -185,12 +187,12 @@ bot.start(async (ctx) => {
     console.error("Start error:", error);
 
     return ctx.reply(
-      "Problem aa rahi hai. Bot ko dono channels mein Admin banayein aur dobara /start karein."
+      "Membership check nahi ho paya. Dono channels mein Bot ko Admin banayein."
     );
   }
 });
 
-// Verify membership
+// VERIFY
 bot.action("verify_membership", async (ctx) => {
   try {
     const joined = await checkMembership(ctx.from.id);
@@ -205,8 +207,6 @@ bot.action("verify_membership", async (ctx) => {
     await ctx.answerCbQuery("Verification successful!");
 
     const fullName = await saveUser(ctx);
-    await ctx.reply("Membership verified successfully!");
-
     return await showMainMenu(ctx, fullName);
 
   } catch (error) {
@@ -219,56 +219,30 @@ bot.action("verify_membership", async (ctx) => {
   }
 });
 
-// Admin panel
-bot.action("admin_panel", async (ctx) => {
+// ADMIN PANEL BUTTON
+bot.hears("Admin Panel ⚙️", async (ctx) => {
   if (!isAdmin(ctx)) {
-    return ctx.answerCbQuery("Access denied!", {
-      show_alert: true
-    });
+    return ctx.reply("Access denied.");
   }
 
   try {
     const active = await getRegistrationStatus();
 
-    await ctx.answerCbQuery();
-
     return ctx.reply(
-      `ADMIN PANEL\n\nRegistration: ${active ? "ON" : "OFF"}`,
-      Markup.inlineKeyboard([
-        [
-          Markup.button.callback(
-            "Registration ON",
-            "registration_on"
-          )
-        ],
-        [
-          Markup.button.callback(
-            "Registration OFF",
-            "registration_off"
-          )
-        ],
-        [
-          Markup.button.callback(
-            "Refresh Status",
-            "admin_panel"
-          )
-        ]
-      ])
+      "⚙️ DEMONS ADMIN PANEL\n\n" +
+      `Registration: ${active ? "ON 🟢" : "OFF 🔴"}`,
+      adminPanelKeyboard()
     );
 
   } catch (error) {
-    console.error("Admin panel error:", error);
+    console.error(error);
     return ctx.reply("Admin Panel load nahi hua.");
   }
 });
 
-// Turn registration ON
-bot.action("registration_on", async (ctx) => {
-  if (!isAdmin(ctx)) {
-    return ctx.answerCbQuery("Access denied!", {
-      show_alert: true
-    });
-  }
+// REGISTRATION ON
+bot.hears("Registration ON 🟢", async (ctx) => {
+  if (!isAdmin(ctx)) return ctx.reply("Access denied.");
 
   const { error } = await supabase
     .from("voting_settings")
@@ -277,22 +251,18 @@ bot.action("registration_on", async (ctx) => {
 
   if (error) {
     console.error(error);
-    return ctx.answerCbQuery("Setting update nahi hui.", {
-      show_alert: true
-    });
+    return ctx.reply("Registration ON nahi hua.");
   }
 
-  await ctx.answerCbQuery("Registration ON ho gaya!");
-  return ctx.reply("Registration ab ON hai.");
+  return ctx.reply(
+    "Registration ON ho gaya! 🟢",
+    adminPanelKeyboard()
+  );
 });
 
-// Turn registration OFF
-bot.action("registration_off", async (ctx) => {
-  if (!isAdmin(ctx)) {
-    return ctx.answerCbQuery("Access denied!", {
-      show_alert: true
-    });
-  }
+// REGISTRATION OFF
+bot.hears("Registration OFF 🔴", async (ctx) => {
+  if (!isAdmin(ctx)) return ctx.reply("Access denied.");
 
   const { error } = await supabase
     .from("voting_settings")
@@ -301,34 +271,39 @@ bot.action("registration_off", async (ctx) => {
 
   if (error) {
     console.error(error);
-    return ctx.answerCbQuery("Setting update nahi hui.", {
-      show_alert: true
-    });
+    return ctx.reply("Registration OFF nahi hua.");
   }
 
-  await ctx.answerCbQuery("Registration OFF ho gaya!");
-  return ctx.reply("Registration ab OFF hai.");
+  return ctx.reply(
+    "Registration OFF ho gaya! 🔴",
+    adminPanelKeyboard()
+  );
 });
 
-// Register user
-bot.action("register_now", async (ctx) => {
+// BACK TO MENU
+bot.hears("Back to Menu", async (ctx) => {
+  try {
+    const fullName = await saveUser(ctx);
+    return await showMainMenu(ctx, fullName);
+  } catch (error) {
+    console.error(error);
+    return ctx.reply("Menu load nahi hua.");
+  }
+});
+
+// REGISTER NOW
+bot.hears("Register Now 📝", async (ctx) => {
   try {
     const joined = await checkMembership(ctx.from.id);
 
     if (!joined) {
-      return ctx.answerCbQuery(
-        "Dono channels join karna zaroori hai!",
-        { show_alert: true }
-      );
+      return await showJoinScreen(ctx);
     }
 
     const active = await getRegistrationStatus();
 
     if (!active) {
-      return ctx.answerCbQuery(
-        "Registration abhi band hai.",
-        { show_alert: true }
-      );
+      return ctx.reply("Registration abhi band hai.");
     }
 
     const telegramId = String(ctx.from.id);
@@ -342,7 +317,6 @@ bot.action("register_now", async (ctx) => {
       ? `${fullName} (@${ctx.from.username})`
       : fullName;
 
-    // Insert only once. Database unique constraint prevents duplicates.
     const { error } = await supabase
       .from("voting_participants")
       .insert({
@@ -352,21 +326,12 @@ bot.action("register_now", async (ctx) => {
 
     if (error) {
       if (error.code === "23505") {
-        return ctx.answerCbQuery(
-          "Aap pehle hi register kar chuke hain!",
-          { show_alert: true }
-        );
+        return ctx.reply("Aap pehle hi register kar chuke hain!");
       }
 
-      console.error("Registration error:", error);
-
-      return ctx.answerCbQuery(
-        "Registration nahi ho paya. Dobara try karein.",
-        { show_alert: true }
-      );
+      console.error(error);
+      return ctx.reply("Registration nahi ho paya.");
     }
-
-    await ctx.answerCbQuery("Registration successful!");
 
     const announcement =
       "🎉 NEW PARTICIPANT REGISTERED!\n\n" +
@@ -374,74 +339,62 @@ bot.action("register_now", async (ctx) => {
       `Telegram ID: ${telegramId}\n\n` +
       "DEMONS VOTING BOT";
 
-    // Send separate announcement to both channels
     const results = await Promise.allSettled(
       CHANNELS.map(channel =>
-        bot.telegram.sendMessage(
-          channel.username,
-          announcement
-        )
+        bot.telegram.sendMessage(channel.username, announcement)
       )
     );
-
-    results.forEach((result, index) => {
-      if (result.status === "rejected") {
-        console.error(
-          `Announcement failed for ${CHANNELS[index].username}:`,
-          result.reason
-        );
-      }
-    });
 
     const bothSent = results.every(
       result => result.status === "fulfilled"
     );
 
-    if (bothSent) {
-      return ctx.reply(
-        "🎉 Aapka Registration successful ho gaya!\n\n" +
-        "Aapki details dono channels par post kar di gayi hain."
-      );
+    if (!bothSent) {
+      console.error("One or more channel announcements failed:", results);
     }
 
     return ctx.reply(
-      "Registration successful ho gaya, lekin channel announcement mein problem aayi. Admin se contact karein."
+      bothSent
+        ? "🎉 Registration successful!\nAapki details dono channels par post ho gayi hain."
+        : "Registration successful hai, lekin announcement mein problem aayi. Admin se contact karein.",
+      isAdmin(ctx) ? adminKeyboard() : userKeyboard()
     );
 
   } catch (error) {
-    console.error("Register action error:", error);
-
-    try {
-      return ctx.answerCbQuery(
-        "Kuch technical problem hui. Dobara try karein.",
-        { show_alert: true }
-      );
-    } catch (_) {}
+    console.error("Registration error:", error);
+    return ctx.reply("Technical problem. Dobara try karein.");
   }
 });
 
-// Home page
+// VOTE PLACEHOLDER
+bot.hears("Vote 🗳️", async (ctx) => {
+  return ctx.reply(
+    "Voting abhi shuru nahi hui hai. Voting start hone par yahan option milega."
+  );
+});
+
+// HOME
 app.get("/", (req, res) => {
   res.send("DEMONS VOTING BOT is running");
 });
 
-// Health check
+// HEALTH
 app.get("/health", (req, res) => {
   res.json({ ok: true });
 });
 
-// Telegram webhook
+// TELEGRAM WEBHOOK
 app.post("/telegram", async (req, res) => {
   try {
     await bot.handleUpdate(req.body);
     res.sendStatus(200);
   } catch (error) {
-    console.error("Telegram update error:", error);
+    console.error("Webhook error:", error);
     res.sendStatus(500);
   }
 });
 
-// Start server
+// SERVER START
 app.listen(PORT, async () => {
   console.log(`DEMONS VOTING BOT running on port ${PORT}`);
 
@@ -451,7 +404,7 @@ app.listen(PORT, async () => {
         `${APP_URL.replace(/\/$/, "")}/telegram`
       );
 
-      console.log("Telegram webhook configured");
+      console.log("Webhook configured");
     } catch (error) {
       console.error("Webhook setup error:", error);
     }
