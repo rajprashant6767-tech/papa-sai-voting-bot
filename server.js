@@ -23,7 +23,7 @@ const supabase = createClient(
 
 const bot = new Telegraf(BOT_TOKEN);
 
-// Dono Telegram channels
+// Telegram Channels
 const CHANNELS = [
   {
     name: "DEMONS GIVEAWAY 2026-27",
@@ -37,7 +37,7 @@ const CHANNELS = [
   }
 ];
 
-// Check membership
+// Check both channel memberships
 async function checkMembership(telegramId) {
   for (const channel of CHANNELS) {
     const member = await bot.telegram.getChatMember(
@@ -57,7 +57,7 @@ async function checkMembership(telegramId) {
   return true;
 }
 
-// Save user after verification
+// Save verified user in Supabase
 async function saveUser(ctx) {
   const telegramId = String(ctx.from.id);
 
@@ -102,18 +102,18 @@ async function showWelcome(ctx) {
   }
 }
 
-// Join buttons
+// Channel buttons - only channel names
 function joinKeyboard() {
   return Markup.inlineKeyboard([
     [
       Markup.button.url(
-        "Join Channel 1",
+        "DEMONS GIVEAWAY 2026-27",
         CHANNELS[0].link
       )
     ],
     [
       Markup.button.url(
-        "Join Channel 2",
+        "ZyloBet",
         CHANNELS[1].link
       )
     ],
@@ -126,7 +126,7 @@ function joinKeyboard() {
   ]);
 }
 
-// Join screen
+// Show channel screen
 async function showJoinScreen(ctx) {
   const message =
     "Welcome to DEMONS VOTING BOT!\n\n" +
@@ -156,11 +156,9 @@ bot.start(async (ctx) => {
   }
 });
 
-// Verify button
+// Verify membership button
 bot.action("verify_membership", async (ctx) => {
   try {
-    await ctx.answerCbQuery("Checking membership...");
-
     const joined = await checkMembership(ctx.from.id);
 
     if (!joined) {
@@ -170,6 +168,7 @@ bot.action("verify_membership", async (ctx) => {
       );
     }
 
+    await ctx.answerCbQuery("Verification successful!");
     await showWelcome(ctx);
 
   } catch (error) {
