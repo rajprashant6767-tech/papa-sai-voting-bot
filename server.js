@@ -44,16 +44,16 @@ function isAdmin(ctx) {
 // USER KEYBOARD
 function userKeyboard() {
   return Markup.keyboard([
-    ["Register Now 📝", "Vote 🗳️"],
-    ["SEE ALL PARTICIPANTS 👥"]
+    ["Register Now 📝", "Add Votes 🗳️"],
+    ["See All Participants 👥"]
   ]).resize();
 }
 
 // ADMIN KEYBOARD
 function adminKeyboard() {
   return Markup.keyboard([
-    ["Register Now 📝", "Vote 🗳️"],
-    ["SEE ALL PARTICIPANTS 👥"],
+    ["Register Now 📝", "Add Votes 🗳️"],
+    ["See All Participants 👥"],
     ["Admin Panel ⚙️"]
   ]).resize();
 }
@@ -62,54 +62,9 @@ function adminKeyboard() {
 function adminPanelKeyboard() {
   return Markup.keyboard([
     ["Registration ON 🟢", "Registration OFF 🔴"],
-    ["START NEW 🔄"],
+    ["Start New 🔄"],
     ["Back to Menu"]
   ]).resize();
-}
-
-// MEMBERSHIP CHECK
-async function checkMembership(telegramId) {
-  for (const channel of CHANNELS) {
-    const member = await bot.telegram.getChatMember(
-      channel.username,
-      telegramId
-    );
-
-    const joined =
-      ["creator", "administrator", "member"].includes(member.status) ||
-      (member.status === "restricted" && member.is_member === true);
-
-    if (!joined) return false;
-  }
-
-  return true;
-}
-
-// CHANNEL DETAILS
-async function getChannelDetails() {
-  const details = [];
-
-  for (const channel of CHANNELS) {
-    const chat = await bot.telegram.getChat(channel.username);
-
-    details.push({
-      title: chat.title,
-      link: channel.link
-    });
-  }
-
-  return details;
-}
-
-// JOIN KEYBOARD
-async function joinKeyboard() {
-  const channels = await getChannelDetails();
-
-  return Markup.inlineKeyboard([
-    [Markup.button.url(channels[0].title, channels[0].link)],
-    [Markup.button.url(channels[1].title, channels[1].link)],
-    [Markup.button.callback("Verify Membership", "verify_membership")]
-  ]);
 }
 
 // SAVE USER
@@ -155,16 +110,6 @@ async function showMainMenu(ctx, fullName) {
     `Welcome ${fullName}!\n\n` +
     "DEMONS VOTING BOT mein aapka swagat hai.",
     isAdmin(ctx) ? adminKeyboard() : userKeyboard()
-  );
-}
-
-// JOIN SCREEN
-async function showJoinScreen(ctx) {
-  return ctx.reply(
-    "Welcome to DEMONS VOTING BOT!\n\n" +
-    "Bot use karne ke liye dono Telegram channels join karein.\n\n" +
-    "Dono channels join karne ke baad Verify button dabayein.",
-    await joinKeyboard()
   );
 }
 
@@ -276,47 +221,14 @@ async function deleteOldChannelPosts(participants) {
   }
 }
 
-// START
+// START - NO MEMBERSHIP REQUIRED
 bot.start(async (ctx) => {
   try {
-    const joined = await checkMembership(ctx.from.id);
-
-    if (!joined) return await showJoinScreen(ctx);
-
     const fullName = await saveUser(ctx);
     return await showMainMenu(ctx, fullName);
-
   } catch (error) {
     console.error("Start error:", error);
-    return ctx.reply(
-      "Membership check nahi ho paya. Dono channels mein Bot ko Admin banayein."
-    );
-  }
-});
-
-// VERIFY
-bot.action("verify_membership", async (ctx) => {
-  try {
-    const joined = await checkMembership(ctx.from.id);
-
-    if (!joined) {
-      return ctx.answerCbQuery(
-        "Pehle dono channels join karein!",
-        { show_alert: true }
-      );
-    }
-
-    await ctx.answerCbQuery("Verification successful!");
-
-    const fullName = await saveUser(ctx);
-    return await showMainMenu(ctx, fullName);
-
-  } catch (error) {
-    console.error("Verify error:", error);
-    return ctx.answerCbQuery(
-      "Verification failed. Dobara try karein.",
-      { show_alert: true }
-    );
+    return ctx.reply("Welcome load nahi hua. Dobara try karein.");
   }
 });
 
@@ -375,7 +287,7 @@ bot.hears("Registration OFF 🔴", async (ctx) => {
 });
 
 // START NEW
-bot.hears("START NEW 🔄", async (ctx) => {
+bot.hears("Start New 🔄", async (ctx) => {
   if (!isAdmin(ctx)) return ctx.reply("Access denied.");
 
   return ctx.reply(
@@ -398,7 +310,7 @@ bot.action("cancel_new_round", async (ctx) => {
   }
 
   await ctx.answerCbQuery("Cancelled");
-  return ctx.editMessageText("START NEW cancel kar diya gaya hai.");
+  return ctx.editMessageText("Start New cancel kar diya gaya hai.");
 });
 
 // CONFIRM NEW ROUND
@@ -462,10 +374,6 @@ bot.hears("Back to Menu", async (ctx) => {
 // REGISTER NOW - ASK CUSTOM NAME
 bot.hears("Register Now 📝", async (ctx) => {
   try {
-    if (!(await checkMembership(ctx.from.id))) {
-      return await showJoinScreen(ctx);
-    }
-
     const settings = await getSettings();
 
     if (!settings.registration_active) {
@@ -515,9 +423,11 @@ async function showParticipants(ctx, page = 0, edit = false) {
   if (error) throw error;
 
   if (!count || !data || data.length === 0) {
-    if (edit) return ctx.editMessageText(
-      "Abhi koi participant registered nahi hai."
-    );
+    if (edit) {
+      return ctx.editMessageText(
+        "Abhi koi participant registered nahi hai."
+      );
+    }
 
     return ctx.reply("Abhi koi participant registered nahi hai.");
   }
@@ -558,14 +468,9 @@ async function showParticipants(ctx, page = 0, edit = false) {
   return ctx.reply(message, keyboard);
 }
 
-bot.hears("SEE ALL PARTICIPANTS 👥", async (ctx) => {
+bot.hears("See All Participants 👥", async (ctx) => {
   try {
-    if (!(await checkMembership(ctx.from.id))) {
-      return await showJoinScreen(ctx);
-    }
-
     return await showParticipants(ctx, 0);
-
   } catch (error) {
     console.error("Participants list error:", error);
     return ctx.reply("Participants list load nahi hui.");
@@ -585,13 +490,9 @@ bot.action(/^participants_page_(\d+)$/, async (ctx) => {
   }
 });
 
-// VOTE MENU - COIN VOTING
-bot.hears("Vote 🗳️", async (ctx) => {
+// ADD VOTES - COIN VOTING
+bot.hears("Add Votes 🗳️", async (ctx) => {
   try {
-    if (!(await checkMembership(ctx.from.id))) {
-      return await showJoinScreen(ctx);
-    }
-
     const { data: participants, error } = await supabase
       .from("voting_participants")
       .select("id, display_name, total_votes")
@@ -626,13 +527,6 @@ bot.hears("Vote 🗳️", async (ctx) => {
 // FREE VOTE FROM CHANNEL POST
 bot.action(/^free_vote_(\d+)$/, async (ctx) => {
   try {
-    if (!(await checkMembership(ctx.from.id))) {
-      return ctx.answerCbQuery(
-        "Free vote dene ke liye dono channels join karein.",
-        { show_alert: true }
-      );
-    }
-
     const participantId = Number(ctx.match[1]);
     const telegramId = String(ctx.from.id);
 
@@ -676,13 +570,6 @@ bot.action(/^free_vote_(\d+)$/, async (ctx) => {
 // SELECT PARTICIPANT FOR COIN VOTE
 bot.action(/^select_participant_(\d+)$/, async (ctx) => {
   try {
-    if (!(await checkMembership(ctx.from.id))) {
-      await ctx.answerCbQuery("Dono channels join karein.", {
-        show_alert: true
-      });
-      return await showJoinScreen(ctx);
-    }
-
     const participantId = Number(ctx.match[1]);
 
     const { data: participant, error } = await supabase
@@ -727,18 +614,13 @@ bot.on("text", async (ctx) => {
 
   // CUSTOM REGISTRATION NAME
   if (pendingRegistrations.has(telegramId)) {
+    if (text.startsWith("/")) return;
+
     if (text.length < 2 || text.length > 50) {
       return ctx.reply("Naam 2 se 50 characters ke beech hona chahiye.");
     }
 
-    if (text.startsWith("/")) return;
-
     try {
-      if (!(await checkMembership(ctx.from.id))) {
-        pendingRegistrations.delete(telegramId);
-        return await showJoinScreen(ctx);
-      }
-
       const settings = await getSettings();
 
       if (!settings.registration_active) {
@@ -815,11 +697,6 @@ bot.on("text", async (ctx) => {
   }
 
   try {
-    if (!(await checkMembership(ctx.from.id))) {
-      pendingVotes.delete(telegramId);
-      return await showJoinScreen(ctx);
-    }
-
     const result = await supabase.rpc("cast_voting_coins", {
       p_voter_telegram_id: telegramId,
       p_participant_id: participantId,
