@@ -33,6 +33,8 @@ const CHANNELS = [
 ];
 
 const pendingVotes = new Map();
+const pendingRegistrations = new Set();
+
 const PARTICIPANTS_PER_PAGE = 20;
 
 function isAdmin(ctx) {
@@ -56,7 +58,7 @@ function adminKeyboard() {
   ]).resize();
 }
 
-// ADMIN PANEL KEYBOARD
+// ADMIN PANEL
 function adminPanelKeyboard() {
   return Markup.keyboard([
     ["Registration ON 🟢", "Registration OFF 🔴"],
@@ -149,90 +151,129 @@ async function getSettings() {
 
 // MAIN MENU
 async function showMainMenu(ctx, fullName) {
-  const message =
-    `Welcome ${fullName}!\n\n` +
-    "DEMONS VOTING BOT mein aapka swagat hai.";
-
   return ctx.reply(
-    message,
+    `Welcome ${fullName}!\n\n` +
+    "DEMONS VOTING BOT mein aapka swagat hai.",
     isAdmin(ctx) ? adminKeyboard() : userKeyboard()
   );
 }
 
 // JOIN SCREEN
 async function showJoinScreen(ctx) {
-  const keyboard = await joinKeyboard();
-
   return ctx.reply(
     "Welcome to DEMONS VOTING BOT!\n\n" +
     "Bot use karne ke liye dono Telegram channels join karein.\n\n" +
     "Dono channels join karne ke baad Verify button dabayein.",
-    keyboard
+    await joinKeyboard()
   );
 }
 
-// SHOW PARTICIPANTS
-async function showParticipants(ctx, page = 0, edit = false) {
-  const from = page * PARTICIPANTS_PER_PAGE;
-  const to = from + PARTICIPANTS_PER_PAGE - 1;
+// CHANNEL POST KEYBOARD
+function channelVoteKeyboard(participantId, totalVotes) {
+  return Markup.inlineKeyboard([
+    [
+      Markup.button.callback(
+        `Vote - ${totalVotes}`,
+        `free_vote_${participantId}`
+      )
+    ]
+  ]);
+}
 
-  const { data: participants, error, count } = await supabase
+// UPDATE BOTH CHANNEL VOTE COUNTS
+async function updateChannelVoteCounts(participantId) {
+  const { data: participant, error } = await supabase
     .from("voting_participants")
-    .select("id, display_name, total_votes", { count: "exact" })
-    .order("total_votes", { ascending: false })
-    .order("id", { ascending: true })
-    .range(from, to);
+    .select("total_votes, channel_message_ids")
+    .eq("id", participantId)
+    .single();
 
   if (error) throw error;
+  if (!participant) return;
 
-  if (!count || !participants || participants.length === 0) {
-    const message = "Abhi koi participant registered nahi hai.";
+  const messageIds = participant.channel_message_ids || {};
 
-    if (edit) return ctx.editMessageText(message);
+  const results = await Promise.allSettled(
+    CHANNELS.map(channel => {
+      const messageId = messageIds[channel.username];
 
-    return ctx.reply(message);
-  }
+      if (!messageId) return Promise.resolve();
 
-  const totalPages = Math.ceil(count / PARTICIPANTS_PER_PAGE);
+      return bot.telegram.editMessageReplyMarkup(
+        channel.username,
+        messageId,
+        undefined,
+        channelVoteKeyboard(
+          participantId,
+          participant.total_votes
+        ).reply_markup
+      );
+    })
+  );
 
-  let message =
-    "👥 ALL PARTICIPANTS\n\n" +
-    `Total Participants: ${count}\n` +
-    `Page: ${page + 1}/${totalPages}\n\n`;
-
-  participants.forEach((participant, index) => {
-    message +=
-      `${from + index + 1}. ${participant.display_name}\n` +
-      `Votes: ${participant.total_votes}\n\n`;
+  results.forEach((result, index) => {
+    if (result.status === "rejected") {
+      console.error(
+        "Channel count update failed:",
+        CHANNELS[index].username,
+        result.reason
+      );
+    }
   });
+}
 
-  const navigation = [];
+// CREATE POSTS IN BOTH CHANNELS
+async function publishParticipant(participant) {
+  const messageIds = {};
 
-  if (page > 0) {
-    navigation.push(
-      Markup.button.callback(
-        "⬅️ Previous",
-        `participants_page_${page - 1}`
-      )
+  const message =
+    "🎉 DEMONS GIVEAWAY\n\n" +
+    `😎 Name: ${participant.display_name}\n` +
+    `❤️ ID: ${participant.telegram_id}`;
+
+  for (const channel of CHANNELS) {
+    const sent = await bot.telegram.sendMessage(
+      channel.username,
+      message,
+      channelVoteKeyboard(participant.id, participant.total_votes)
     );
+
+    messageIds[channel.username] = sent.message_id;
   }
 
-  if (page + 1 < totalPages) {
-    navigation.push(
-      Markup.button.callback(
-        "Next ➡️",
-        `participants_page_${page + 1}`
-      )
-    );
+  const { error } = await supabase
+    .from("voting_participants")
+    .update({ channel_message_ids: messageIds })
+    .eq("id", participant.id);
+
+  if (error) throw error;
+}
+
+// DELETE OLD CHANNEL POSTS
+async function deleteOldChannelPosts(participants) {
+  for (const participant of participants) {
+    const messageIds = participant.channel_message_ids || {};
+
+    for (const channel of CHANNELS) {
+      const messageId = messageIds[channel.username];
+
+      if (!messageId) continue;
+
+      try {
+        await bot.telegram.deleteMessage(
+          channel.username,
+          messageId
+        );
+      } catch (error) {
+        console.error(
+          "Old post delete failed:",
+          channel.username,
+          messageId,
+          error.description || error.message
+        );
+      }
+    }
   }
-
-  const keyboard = navigation.length
-    ? Markup.inlineKeyboard([navigation])
-    : undefined;
-
-  if (edit) return ctx.editMessageText(message, keyboard);
-
-  return ctx.reply(message, keyboard);
 }
 
 // START
@@ -333,30 +374,21 @@ bot.hears("Registration OFF 🔴", async (ctx) => {
   return ctx.reply("Registration OFF ho gaya! 🔴", adminPanelKeyboard());
 });
 
-// START NEW - CONFIRMATION
+// START NEW
 bot.hears("START NEW 🔄", async (ctx) => {
   if (!isAdmin(ctx)) return ctx.reply("Access denied.");
 
-  try {
-    return ctx.reply(
-      "⚠️ START NEW VOTING ROUND\n\n" +
-      "Is action se:\n" +
-      "• Purane participants delete honge.\n" +
-      "• Purane vote records delete honge.\n" +
-      "• Vote debit wallet records delete honge.\n\n" +
-      "Users ke Coins aur payment records safe rahenge.\n\n" +
-      "Ye action undo nahi ho sakta.\n\n" +
-      "Kya aap naya round start karna chahte hain?",
-      Markup.inlineKeyboard([
-        [Markup.button.callback("✅ CONFIRM NEW ROUND", "confirm_new_round")],
-        [Markup.button.callback("❌ CANCEL", "cancel_new_round")]
-      ])
-    );
-
-  } catch (error) {
-    console.error("Start New confirmation error:", error);
-    return ctx.reply("Confirmation load nahi hua.");
-  }
+  return ctx.reply(
+    "⚠️ START NEW VOTING ROUND\n\n" +
+    "Purane participants aur vote records delete honge.\n" +
+    "Purane channel posts bhi delete karne ki koshish hogi.\n\n" +
+    "Coins aur payment records safe rahenge.\n\n" +
+    "Kya aap new round start karna chahte hain?",
+    Markup.inlineKeyboard([
+      [Markup.button.callback("✅ CONFIRM NEW ROUND", "confirm_new_round")],
+      [Markup.button.callback("❌ CANCEL", "cancel_new_round")]
+    ])
+  );
 });
 
 // CANCEL NEW ROUND
@@ -366,7 +398,6 @@ bot.action("cancel_new_round", async (ctx) => {
   }
 
   await ctx.answerCbQuery("Cancelled");
-
   return ctx.editMessageText("START NEW cancel kar diya gaya hai.");
 });
 
@@ -379,36 +410,41 @@ bot.action("confirm_new_round", async (ctx) => {
   try {
     await ctx.answerCbQuery("New round process ho raha hai...");
 
+    const { data: oldParticipants, error: fetchError } = await supabase
+      .from("voting_participants")
+      .select("id, channel_message_ids");
+
+    if (fetchError) throw fetchError;
+
     const { data, error } = await supabase.rpc(
       "start_new_voting_round"
     );
 
-    if (error) {
-      console.error("Start New RPC error:", error);
-      return ctx.editMessageText(
-        "New round start nahi hua. Admin logs check karein."
-      );
-    }
+    if (error) throw error;
 
     if (!data || !data.success) {
       return ctx.editMessageText("New round start nahi hua.");
     }
 
     pendingVotes.clear();
+    pendingRegistrations.clear();
+
+    await deleteOldChannelPosts(oldParticipants || []);
 
     return ctx.editMessageText(
       "✅ NEW VOTING ROUND STARTED!\n\n" +
       `Old participants deleted: ${data.deleted_participants}\n` +
       `Old votes deleted: ${data.deleted_votes}\n` +
-      `Old vote wallet records deleted: ${data.deleted_wallet_records}\n\n` +
+      `Old free votes deleted: ${data.deleted_free_votes || 0}\n\n` +
       "Registration: ON 🟢\n" +
-      "Voting: ALWAYS ON 🟢\n\n" +
-      "Users ab naye round ke liye register kar sakte hain."
+      "Voting: ALWAYS ON 🟢"
     );
 
   } catch (error) {
-    console.error("Confirm New Round error:", error);
-    return ctx.reply("Technical problem. Dobara try karein.");
+    console.error("Start New error:", error);
+    return ctx.editMessageText(
+      "New round start nahi hua. Admin logs check karein."
+    );
   }
 });
 
@@ -423,7 +459,7 @@ bot.hears("Back to Menu", async (ctx) => {
   }
 });
 
-// REGISTER NOW
+// REGISTER NOW - ASK CUSTOM NAME
 bot.hears("Register Now 📝", async (ctx) => {
   try {
     if (!(await checkMembership(ctx.from.id))) {
@@ -438,65 +474,90 @@ bot.hears("Register Now 📝", async (ctx) => {
 
     const telegramId = String(ctx.from.id);
 
-    const fullName = [
-      ctx.from.first_name,
-      ctx.from.last_name
-    ].filter(Boolean).join(" ") || "User";
-
-    const displayName = ctx.from.username
-      ? `${fullName} (@${ctx.from.username})`
-      : fullName;
-
-    const { error } = await supabase
+    const { data: existing, error } = await supabase
       .from("voting_participants")
-      .insert({
-        telegram_id: telegramId,
-        display_name: displayName
-      });
+      .select("id")
+      .eq("telegram_id", telegramId)
+      .maybeSingle();
 
-    if (error) {
-      if (error.code === "23505") {
-        return ctx.reply("Aap pehle hi register kar chuke hain!");
-      }
+    if (error) throw error;
 
-      console.error(error);
-      return ctx.reply("Registration nahi ho paya.");
+    if (existing) {
+      return ctx.reply("Aap is round mein pehle hi register kar chuke hain!");
     }
 
-    const announcement =
-      "🎉 NEW PARTICIPANT REGISTERED!\n\n" +
-      `Name: ${fullName}\n` +
-      `Telegram ID: ${telegramId}\n\n` +
-      "DEMONS VOTING BOT";
-
-    const results = await Promise.allSettled(
-      CHANNELS.map(channel =>
-        bot.telegram.sendMessage(channel.username, announcement)
-      )
-    );
-
-    const bothSent = results.every(
-      result => result.status === "fulfilled"
-    );
-
-    if (!bothSent) {
-      console.error("Announcement error:", results);
-    }
+    pendingRegistrations.add(telegramId);
 
     return ctx.reply(
-      bothSent
-        ? "🎉 Registration successful!\nDetails dono channels par post ho gayi hain."
-        : "Registration successful hai, lekin announcement mein problem aayi. Admin se contact karein.",
-      isAdmin(ctx) ? adminKeyboard() : userKeyboard()
+      "📝 DEMONS GIVEAWAY REGISTRATION\n\n" +
+      "Apna display name type karke send karein.\n\n" +
+      "Aap jo naam bhejenge, wahi dono channels par show hoga.\n" +
+      "Aapki Telegram ID automatically add hogi."
     );
 
   } catch (error) {
-    console.error("Registration error:", error);
-    return ctx.reply("Technical problem. Dobara try karein.");
+    console.error("Registration start error:", error);
+    return ctx.reply("Registration start nahi ho paya.");
   }
 });
 
 // SEE ALL PARTICIPANTS
+async function showParticipants(ctx, page = 0, edit = false) {
+  const from = page * PARTICIPANTS_PER_PAGE;
+  const to = from + PARTICIPANTS_PER_PAGE - 1;
+
+  const { data, error, count } = await supabase
+    .from("voting_participants")
+    .select("id, display_name, total_votes", { count: "exact" })
+    .order("total_votes", { ascending: false })
+    .range(from, to);
+
+  if (error) throw error;
+
+  if (!count || !data || data.length === 0) {
+    if (edit) return ctx.editMessageText(
+      "Abhi koi participant registered nahi hai."
+    );
+
+    return ctx.reply("Abhi koi participant registered nahi hai.");
+  }
+
+  const totalPages = Math.ceil(count / PARTICIPANTS_PER_PAGE);
+
+  let message =
+    "👥 ALL PARTICIPANTS\n\n" +
+    `Total Participants: ${count}\n` +
+    `Page: ${page + 1}/${totalPages}\n\n`;
+
+  data.forEach((participant, index) => {
+    message +=
+      `${from + index + 1}. ${participant.display_name}\n` +
+      `Votes: ${participant.total_votes}\n\n`;
+  });
+
+  const buttons = [];
+
+  if (page > 0) {
+    buttons.push(
+      Markup.button.callback("⬅️ Previous", `participants_page_${page - 1}`)
+    );
+  }
+
+  if (page + 1 < totalPages) {
+    buttons.push(
+      Markup.button.callback("Next ➡️", `participants_page_${page + 1}`)
+    );
+  }
+
+  const keyboard = buttons.length
+    ? Markup.inlineKeyboard([buttons])
+    : undefined;
+
+  if (edit) return ctx.editMessageText(message, keyboard);
+
+  return ctx.reply(message, keyboard);
+}
+
 bot.hears("SEE ALL PARTICIPANTS 👥", async (ctx) => {
   try {
     if (!(await checkMembership(ctx.from.id))) {
@@ -511,31 +572,20 @@ bot.hears("SEE ALL PARTICIPANTS 👥", async (ctx) => {
   }
 });
 
-// PARTICIPANTS PAGINATION
 bot.action(/^participants_page_(\d+)$/, async (ctx) => {
   try {
-    if (!(await checkMembership(ctx.from.id))) {
-      await ctx.answerCbQuery("Dono channels join karein.", {
-        show_alert: true
-      });
-      return await showJoinScreen(ctx);
-    }
-
     const page = Number(ctx.match[1]);
-
     await ctx.answerCbQuery();
-
     return await showParticipants(ctx, page, true);
-
   } catch (error) {
-    console.error("Participants page error:", error);
+    console.error(error);
     return ctx.answerCbQuery("List load nahi hui.", {
       show_alert: true
     });
   }
 });
 
-// VOTE MENU - ALWAYS ON
+// VOTE MENU - COIN VOTING
 bot.hears("Vote 🗳️", async (ctx) => {
   try {
     if (!(await checkMembership(ctx.from.id))) {
@@ -553,16 +603,17 @@ bot.hears("Vote 🗳️", async (ctx) => {
       return ctx.reply("Abhi koi registered participant nahi hai.");
     }
 
-    const buttons = participants.map((participant) => [
+    const buttons = participants.map(participant => [
       Markup.button.callback(
-        participant.display_name.substring(0, 55),
+        `${participant.display_name.substring(0, 35)} (${participant.total_votes})`,
         `select_participant_${participant.id}`
       )
     ]);
 
     return ctx.reply(
-      "🗳️ VOTE MENU\n\n" +
-      "Jis participant ko vote dena hai, uska naam select karein:",
+      "🗳️ COIN VOTING\n\n" +
+      "Participant select karein.\n" +
+      "1 Coin = 1 Vote",
       Markup.inlineKeyboard(buttons)
     );
 
@@ -572,7 +623,57 @@ bot.hears("Vote 🗳️", async (ctx) => {
   }
 });
 
-// SELECT PARTICIPANT
+// FREE VOTE FROM CHANNEL POST
+bot.action(/^free_vote_(\d+)$/, async (ctx) => {
+  try {
+    if (!(await checkMembership(ctx.from.id))) {
+      return ctx.answerCbQuery(
+        "Free vote dene ke liye dono channels join karein.",
+        { show_alert: true }
+      );
+    }
+
+    const participantId = Number(ctx.match[1]);
+    const telegramId = String(ctx.from.id);
+
+    const result = await supabase.rpc("cast_free_vote", {
+      p_voter_telegram_id: telegramId,
+      p_participant_id: participantId
+    });
+
+    if (result.error) {
+      console.error("Free vote RPC error:", result.error);
+      return ctx.answerCbQuery("Vote process nahi hua.", {
+        show_alert: true
+      });
+    }
+
+    if (!result.data || !result.data.success) {
+      return ctx.answerCbQuery(
+        result.data?.message === "Already voted"
+          ? "Aap apna free vote pehle hi de chuke hain."
+          : "Vote nahi ho paya.",
+        { show_alert: true }
+      );
+    }
+
+    await updateChannelVoteCounts(participantId);
+
+    return ctx.answerCbQuery(
+      "Free vote successful! Total votes: " +
+      result.data.total_votes,
+      { show_alert: true }
+    );
+
+  } catch (error) {
+    console.error("Free vote error:", error);
+    return ctx.answerCbQuery("Technical problem. Dobara try karein.", {
+      show_alert: true
+    });
+  }
+});
+
+// SELECT PARTICIPANT FOR COIN VOTE
 bot.action(/^select_participant_(\d+)$/, async (ctx) => {
   try {
     if (!(await checkMembership(ctx.from.id))) {
@@ -607,8 +708,7 @@ bot.action(/^select_participant_(\d+)$/, async (ctx) => {
       "Jitne Coins spend karoge, utne hi Votes milenge.\n\n" +
       "Enter Vote Number\n\n" +
       "Example: 10\n\n" +
-      "Example: 10 enter karne par 10 Coins deduct honge aur " +
-      `${participant.display_name} ko 10 Votes milenge.\n\n` +
+      `10 Coins se ${participant.display_name} ko 10 Votes milenge.\n\n` +
       "Enter your vote number below."
     );
 
@@ -620,108 +720,69 @@ bot.action(/^select_participant_(\d+)$/, async (ctx) => {
   }
 });
 
-// HANDLE COIN AMOUNT
+// HANDLE USER TEXT
 bot.on("text", async (ctx) => {
   const telegramId = String(ctx.from.id);
+  const text = ctx.message.text.trim();
 
-  if (!pendingVotes.has(telegramId)) return;
-
-  const participantId = pendingVotes.get(telegramId);
-  const amountText = ctx.message.text.trim();
-
-  if (!/^[1-9]\d*$/.test(amountText)) {
-    return ctx.reply("Kripya Coins ki sahi positive sankhya bhejein.");
-  }
-
-  const coins = Number(amountText);
-
-  if (!Number.isSafeInteger(coins)) {
-    return ctx.reply("Coin amount bahut bada hai. Sahi amount bhejein.");
-  }
-
-  try {
-    if (!(await checkMembership(ctx.from.id))) {
-      pendingVotes.delete(telegramId);
-      return await showJoinScreen(ctx);
+  // CUSTOM REGISTRATION NAME
+  if (pendingRegistrations.has(telegramId)) {
+    if (text.length < 2 || text.length > 50) {
+      return ctx.reply("Naam 2 se 50 characters ke beech hona chahiye.");
     }
 
-    const result = await supabase.rpc("cast_voting_coins", {
-      p_voter_telegram_id: telegramId,
-      p_participant_id: participantId,
-      p_coins: coins
-    });
+    if (text.startsWith("/")) return;
 
-    if (result.error) {
-      console.error("Vote RPC error:", result.error);
-      return ctx.reply("Vote process nahi ho paya. Admin se contact karein.");
-    }
+    try {
+      if (!(await checkMembership(ctx.from.id))) {
+        pendingRegistrations.delete(telegramId);
+        return await showJoinScreen(ctx);
+      }
 
-    const data = result.data;
+      const settings = await getSettings();
 
-    if (!data || !data.success) {
-      pendingVotes.delete(telegramId);
+      if (!settings.registration_active) {
+        pendingRegistrations.delete(telegramId);
+        return ctx.reply("Registration abhi band hai.");
+      }
 
-      const messages = {
-        "Insufficient coins": "Aapke paas itne Coins nahi hain.",
-        "Voting is closed": "Voting abhi band hai.",
-        "Participant not found": "Participant nahi mila.",
-        "User not found": "Aapka account nahi mila."
-      };
+      const { data: existing, error: existingError } = await supabase
+        .from("voting_participants")
+        .select("id")
+        .eq("telegram_id", telegramId)
+        .maybeSingle();
+
+      if (existingError) throw existingError;
+
+      if (existing) {
+        pendingRegistrations.delete(telegramId);
+        return ctx.reply("Aap is round mein pehle hi register kar chuke hain!");
+      }
+
+      const { data: inserted, error } = await supabase
+        .from("voting_participants")
+        .insert({
+          telegram_id: telegramId,
+          display_name: text,
+          total_votes: 0,
+          free_votes: 0
+        })
+        .select("id, telegram_id, display_name, total_votes")
+        .single();
+
+      if (error) throw error;
+
+      pendingRegistrations.delete(telegramId);
+
+      let publishError = null;
+
+      try {
+        await publishParticipant(inserted);
+      } catch (error) {
+        publishError = error;
+        console.error("Channel publishing error:", error);
+      }
 
       return ctx.reply(
-        messages[data?.message] || data?.message || "Vote nahi laga."
-      );
-    }
-
-    pendingVotes.delete(telegramId);
-
-    return ctx.reply(
-      "✅ VOTE SUCCESSFUL!\n\n" +
-      `Votes added: ${data.votes_added}\n` +
-      `Remaining Coins: ${data.remaining_coins}`,
-      isAdmin(ctx) ? adminKeyboard() : userKeyboard()
-    );
-
-  } catch (error) {
-    console.error("Vote processing error:", error);
-    return ctx.reply("Technical problem. Dobara try karein.");
-  }
-});
-
-// HOME
-app.get("/", (req, res) => {
-  res.send("DEMONS VOTING BOT is running");
-});
-
-// HEALTH
-app.get("/health", (req, res) => {
-  res.json({ ok: true });
-});
-
-// WEBHOOK
-app.post("/telegram", async (req, res) => {
-  try {
-    await bot.handleUpdate(req.body);
-    res.sendStatus(200);
-  } catch (error) {
-    console.error("Webhook error:", error);
-    res.sendStatus(500);
-  }
-});
-
-// SERVER START
-app.listen(PORT, async () => {
-  console.log(`DEMONS VOTING BOT running on port ${PORT}`);
-
-  if (APP_URL) {
-    try {
-      await bot.telegram.setWebhook(
-        `${APP_URL.replace(/\/$/, "")}/telegram`
-      );
-
-      console.log("Webhook configured");
-    } catch (error) {
-      console.error("Webhook setup error:", error);
-    }
-  }
-});
+        publishError
+          ? "Registration successful hai, lekin channel pos
