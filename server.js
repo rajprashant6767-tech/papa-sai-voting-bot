@@ -1,4 +1,3 @@
-
 const express = require("express");
 const { Telegraf, Markup } = require("telegraf");
 const { createClient } = require("@supabase/supabase-js");
@@ -39,7 +38,6 @@ const CHANNELS = [
 const pendingVotes = new Map();
 const pendingRegistrations = new Set();
 
-// Add Money states
 const pendingMoneyAmount = new Set();
 const pendingMoneyProof = new Map();
 
@@ -52,8 +50,7 @@ function isAdmin(ctx) {
 // USER KEYBOARD
 function userKeyboard() {
   return Markup.keyboard([
-    ["Add Money 💰"],
-    ["Register Now 📝"],
+    ["Add Money 💰", "Register Now 📝"],
     ["Add Votes 🗳️", "Check Balance 💳"],
     ["See All Participants 👥"]
   ]).resize();
@@ -62,8 +59,7 @@ function userKeyboard() {
 // ADMIN KEYBOARD
 function adminKeyboard() {
   return Markup.keyboard([
-    ["Add Money 💰"],
-    ["Register Now 📝"],
+    ["Add Money 💰", "Register Now 📝"],
     ["Add Votes 🗳️", "Check Balance 💳"],
     ["See All Participants 👥"],
     ["Admin Panel ⚙️"]
@@ -296,10 +292,24 @@ async function sendPaymentQR(ctx, amount) {
         "💰 PAYMENT QR CODE\n\n" +
         `Account Name: ${ACCOUNT_NAME}\n` +
         `UPI ID: ${UPI_ID}\n` +
-        `Amount: ₹${amount}\n\n` +
-        "QR scan karke exact amount pay karein.\n" +
-        "Payment ke baad payment screenshot yahan bhejein.\n\n" +
-        "⚠️ Screenshot payment confirmation nahi hai. Payment verify hone ke baad hi wallet credit hoga."
+        `Payment Amount: ₹${amount}\n\n` +
+
+        "📲 QR SCAN KARKE PAYMENT KAREIN\n\n" +
+
+        "⚠️ IMPORTANT WARNING ⚠️\n" +
+        `Aapko exactly ₹${amount} hi pay karna hai.\n` +
+        "Diya gaya amount aur actual payment amount match nahi karega, " +
+        "to payment request REJECT kar di jayegi.\n\n" +
+
+        "📝 IMPORTANT NOTE\n" +
+        "Kripya clean aur clearly visible payment screenshot bhejein.\n" +
+        "Screenshot mein Date, Time, Amount aur Transaction Details " +
+        "achhe se dikhne chahiye.\n" +
+        "Blur ya incomplete screenshot accept nahi kiya jayega.\n\n" +
+
+        "📸 Payment ke baad screenshot yahan bhejein.\n\n" +
+        "⚠️ Screenshot payment confirmation nahi hai. " +
+        "Actual payment verify hone ke baad hi wallet credit hoga."
     }
   );
 }
@@ -334,7 +344,7 @@ async function createMoneyRequest(ctx) {
       "✅ PAYMENT REQUEST SUBMITTED\n\n" +
       `Request ID: ${request.id}\n` +
       `Amount: ₹${request.amount}\n\n` +
-      "Aapka screenshot dono admins ko bhej diya gaya hai.\n" +
+      "Aapka screenshot admins ko bhejne ki koshish ki ja rahi hai.\n" +
       "Payment verify hone ke baad wallet update hoga."
     );
 
@@ -350,7 +360,7 @@ async function createMoneyRequest(ctx) {
       `Telegram ID: ${telegramId}\n` +
       `Username: @${ctx.from.username || "Not available"}\n` +
       `Amount: ₹${request.amount}\n\n` +
-      "Receiving account mein payment verify karne ke baad hi approve karein.";
+      "Receiving account mein actual payment verify karne ke baad hi approve karein.";
 
     const keyboard = Markup.inlineKeyboard([
       [
@@ -410,6 +420,15 @@ bot.action(/^approve_money_(\d+)$/, async (ctx) => {
   try {
     await ctx.answerCbQuery("Payment verify kar rahe hain...");
 
+    // Request details fetch first
+    const { data: request, error: requestError } = await supabase
+      .from("add_money_requests")
+      .select("telegram_id")
+      .eq("id", requestId)
+      .single();
+
+    if (requestError) throw requestError;
+
     const result = await supabase.rpc(
       "approve_add_money_request",
       {
@@ -436,11 +455,7 @@ bot.action(/^approve_money_(\d+)$/, async (ctx) => {
     );
 
     await bot.telegram.sendMessage(
-      (await supabase
-        .from("add_money_requests")
-        .select("telegram_id")
-        .eq("id", requestId)
-        .single()).data.telegram_id,
+      request.telegram_id,
       "✅ PAYMENT APPROVED\n\n" +
       `Request ID: ${requestId}\n` +
       `Wallet balance: ₹${data.new_balance}`
@@ -983,8 +998,16 @@ bot.on("text", async (ctx) => {
       await sendPaymentQR(ctx, amount);
 
       return ctx.reply(
-        "📸 Ab payment ka screenshot bhejein.\n\n" +
-        "Screenshot bhejne ke baad request admins ko jayegi."
+        "📸 PAYMENT SCREENSHOT BHEJEIN\n\n" +
+        `Aapka payment amount: ₹${amount}\n\n` +
+        "⚠️ Actual payment amount ₹" + amount +
+        " se match nahi karega to request reject ho jayegi.\n\n" +
+        "📝 Screenshot mein ye details clearly visible honi chahiye:\n" +
+        "• Date\n" +
+        "• Time\n" +
+        "• Payment Amount\n" +
+        "• Transaction Details\n\n" +
+        "Kripya clean aur clear screenshot bhejein."
       );
 
     } catch (error) {
