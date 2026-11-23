@@ -1,3 +1,4 @@
+
 const express = require("express");
 const { Telegraf, Markup } = require("telegraf");
 const { createClient } = require("@supabase/supabase-js");
@@ -37,9 +38,9 @@ const CHANNELS = [
 
 const pendingVotes = new Map();
 const pendingRegistrations = new Set();
-
 const pendingMoneyAmount = new Set();
 const pendingMoneyProof = new Map();
+const pendingAdminMinusVotes = new Map();
 
 const PARTICIPANTS_PER_PAGE = 20;
 
@@ -47,35 +48,42 @@ function isAdmin(ctx) {
   return ADMIN_IDS.includes(String(ctx.from.id));
 }
 
-// USER KEYBOARD
+// =====================================
+// KEYBOARDS
+// =====================================
+
 function userKeyboard() {
   return Markup.keyboard([
     ["Add Money 💰", "Register Now 📝"],
     ["Add Votes 🗳️", "Check Balance 💳"],
-    ["See All Participants 👥"]
+    ["See All Participants 👥"],
+    ["Payment History 📜"]
   ]).resize();
 }
 
-// ADMIN KEYBOARD
 function adminKeyboard() {
   return Markup.keyboard([
     ["Add Money 💰", "Register Now 📝"],
     ["Add Votes 🗳️", "Check Balance 💳"],
     ["See All Participants 👥"],
+    ["Payment History 📜"],
     ["Admin Panel ⚙️"]
   ]).resize();
 }
 
-// ADMIN PANEL
 function adminPanelKeyboard() {
   return Markup.keyboard([
     ["Registration ON 🟢", "Registration OFF 🔴"],
+    ["Minus Votes ➖", "Remove Voter ❌"],
     ["Start New 🔄"],
     ["Back to Menu"]
   ]).resize();
 }
 
+// =====================================
 // SAVE USER
+// =====================================
+
 async function saveUser(ctx) {
   const telegramId = String(ctx.from.id);
 
@@ -99,7 +107,10 @@ async function saveUser(ctx) {
   return fullName;
 }
 
+// =====================================
 // SETTINGS
+// =====================================
+
 async function getSettings() {
   const { data, error } = await supabase
     .from("voting_settings")
@@ -111,7 +122,6 @@ async function getSettings() {
   return data;
 }
 
-// MAIN MENU
 async function showMainMenu(ctx, fullName) {
   return ctx.reply(
     `Welcome ${fullName}!\n\n` +
@@ -120,7 +130,10 @@ async function showMainMenu(ctx, fullName) {
   );
 }
 
-// CHANNEL POST KEYBOARD
+// =====================================
+// CHANNEL POST FUNCTIONS
+// =====================================
+
 function channelVoteKeyboard(participantId, totalVotes) {
   return Markup.inlineKeyboard([
     [
@@ -132,13 +145,12 @@ function channelVoteKeyboard(participantId, totalVotes) {
   ]);
 }
 
-// UPDATE BOTH CHANNEL VOTE COUNTS
 async function updateChannelVoteCounts(participantId) {
   const { data: participant, error } = await supabase
     .from("voting_participants")
     .select("total_votes, channel_message_ids")
     .eq("id", participantId)
-    .single();
+    .maybeSingle();
 
   if (error) throw error;
   if (!participant) return;
@@ -174,7 +186,6 @@ async function updateChannelVoteCounts(participantId) {
   });
 }
 
-// CREATE POSTS IN BOTH CHANNELS
 async function publishParticipant(participant) {
   const messageIds = {};
 
@@ -201,7 +212,6 @@ async function publishParticipant(participant) {
   if (error) throw error;
 }
 
-// DELETE OLD CHANNEL POSTS
 async function deleteOldChannelPosts(participants) {
   for (const participant of participants) {
     const messageIds = participant.channel_message_ids || {};
@@ -232,7 +242,6 @@ async function deleteOldChannelPosts(participants) {
 // ADD MONEY
 // =====================================
 
-// ADD MONEY BUTTON
 bot.hears("Add Money 💰", async (ctx) => {
   try {
     await saveUser(ctx);
@@ -254,7 +263,6 @@ bot.hears("Add Money 💰", async (ctx) => {
   }
 });
 
-// CANCEL PENDING ACTION
 bot.command("cancel", async (ctx) => {
   const id = String(ctx.from.id);
 
@@ -262,6 +270,7 @@ bot.command("cancel", async (ctx) => {
   pendingMoneyProof.delete(id);
   pendingRegistrations.delete(id);
   pendingVotes.delete(id);
+  pendingAdminMinusVotes.delete(id);
 
   return ctx.reply(
     "Current process cancel kar diya gaya hai.",
@@ -269,7 +278,6 @@ bot.command("cancel", async (ctx) => {
   );
 });
 
-// GENERATE UPI QR
 async function sendPaymentQR(ctx, amount) {
   const upiLink =
     "upi://pay" +
@@ -293,20 +301,16 @@ async function sendPaymentQR(ctx, amount) {
         `Account Name: ${ACCOUNT_NAME}\n` +
         `UPI ID: ${UPI_ID}\n` +
         `Payment Amount: ₹${amount}\n\n` +
-
         "📲 QR SCAN KARKE PAYMENT KAREIN\n\n" +
-
         "⚠️ IMPORTANT WARNING ⚠️\n" +
         `Aapko exactly ₹${amount} hi pay karna hai.\n` +
         "Diya gaya amount aur actual payment amount match nahi karega, " +
         "to payment request REJECT kar di jayegi.\n\n" +
-
         "📝 IMPORTANT NOTE\n" +
         "Kripya clean aur clearly visible payment screenshot bhejein.\n" +
         "Screenshot mein Date, Time, Amount aur Transaction Details " +
         "achhe se dikhne chahiye.\n" +
         "Blur ya incomplete screenshot accept nahi kiya jayega.\n\n" +
-
         "📸 Payment ke baad screenshot yahan bhejein.\n\n" +
         "⚠️ Screenshot payment confirmation nahi hai. " +
         "Actual payment verify hone ke baad hi wallet credit hoga."
@@ -314,7 +318,6 @@ async function sendPaymentQR(ctx, amount) {
   );
 }
 
-// CREATE PAYMENT REQUEST AFTER SCREENSHOT
 async function createMoneyRequest(ctx) {
   const telegramId = String(ctx.from.id);
   const amount = pendingMoneyProof.get(telegramId);
@@ -329,7 +332,7 @@ async function createMoneyRequest(ctx) {
       .from("add_money_requests")
       .insert({
         telegram_id: telegramId,
-        amount: amount,
+        amount,
         screenshot_file_id: fileId,
         status: "pending"
       })
@@ -364,27 +367,17 @@ async function createMoneyRequest(ctx) {
 
     const keyboard = Markup.inlineKeyboard([
       [
-        Markup.button.callback(
-          "✅ Approve",
-          `approve_money_${request.id}`
-        ),
-        Markup.button.callback(
-          "❌ Reject",
-          `reject_money_${request.id}`
-        )
+        Markup.button.callback("✅ Approve", `approve_money_${request.id}`),
+        Markup.button.callback("❌ Reject", `reject_money_${request.id}`)
       ]
     ]);
 
     const results = await Promise.allSettled(
       ADMIN_IDS.map(adminId =>
-        bot.telegram.sendPhoto(
-          adminId,
-          fileId,
-          {
-            caption,
-            ...keyboard
-          }
-        )
+        bot.telegram.sendPhoto(adminId, fileId, {
+          caption,
+          ...keyboard
+        })
       )
     );
 
@@ -400,19 +393,19 @@ async function createMoneyRequest(ctx) {
 
   } catch (error) {
     console.error("Create payment request error:", error);
-
     return ctx.reply(
       "Payment request submit nahi hua. Admin se contact karein."
     );
   }
 }
 
-// ADMIN APPROVE
+// =====================================
+// ADMIN APPROVE PAYMENT
+// =====================================
+
 bot.action(/^approve_money_(\d+)$/, async (ctx) => {
   if (!isAdmin(ctx)) {
-    return ctx.answerCbQuery("Access denied.", {
-      show_alert: true
-    });
+    return ctx.answerCbQuery("Access denied.", { show_alert: true });
   }
 
   const requestId = Number(ctx.match[1]);
@@ -420,7 +413,6 @@ bot.action(/^approve_money_(\d+)$/, async (ctx) => {
   try {
     await ctx.answerCbQuery("Payment verify kar rahe hain...");
 
-    // Request details fetch first
     const { data: request, error: requestError } = await supabase
       .from("add_money_requests")
       .select("telegram_id")
@@ -429,13 +421,10 @@ bot.action(/^approve_money_(\d+)$/, async (ctx) => {
 
     if (requestError) throw requestError;
 
-    const result = await supabase.rpc(
-      "approve_add_money_request",
-      {
-        p_request_id: requestId,
-        p_admin_id: String(ctx.from.id)
-      }
-    );
+    const result = await supabase.rpc("approve_add_money_request", {
+      p_request_id: requestId,
+      p_admin_id: String(ctx.from.id)
+    });
 
     if (result.error) throw result.error;
 
@@ -461,25 +450,23 @@ bot.action(/^approve_money_(\d+)$/, async (ctx) => {
       `Wallet balance: ₹${data.new_balance}`
     );
 
-    return ctx.reply(
-      `Request ${requestId} approved successfully.`
-    );
+    return ctx.reply(`Request ${requestId} approved successfully.`);
 
   } catch (error) {
     console.error("Approve payment error:", error);
-
     return ctx.reply(
       "Approval process mein error aaya. Database check karein."
     );
   }
 });
 
-// ADMIN REJECT
+// =====================================
+// ADMIN REJECT PAYMENT
+// =====================================
+
 bot.action(/^reject_money_(\d+)$/, async (ctx) => {
   if (!isAdmin(ctx)) {
-    return ctx.answerCbQuery("Access denied.", {
-      show_alert: true
-    });
+    return ctx.answerCbQuery("Access denied.", { show_alert: true });
   }
 
   const requestId = Number(ctx.match[1]);
@@ -487,13 +474,10 @@ bot.action(/^reject_money_(\d+)$/, async (ctx) => {
   try {
     await ctx.answerCbQuery("Request reject ho rahi hai...");
 
-    const result = await supabase.rpc(
-      "reject_add_money_request",
-      {
-        p_request_id: requestId,
-        p_admin_id: String(ctx.from.id)
-      }
-    );
+    const result = await supabase.rpc("reject_add_money_request", {
+      p_request_id: requestId,
+      p_admin_id: String(ctx.from.id)
+    });
 
     if (result.error) throw result.error;
 
@@ -527,16 +511,117 @@ bot.action(/^reject_money_(\d+)$/, async (ctx) => {
       "Agar aapne payment kiya hai, receiving account mein status verify karne ke liye admin se contact karein."
     );
 
-    return ctx.reply(
-      `Request ${requestId} rejected.`
-    );
+    return ctx.reply(`Request ${requestId} rejected.`);
 
   } catch (error) {
     console.error("Reject payment error:", error);
+    return ctx.reply("Reject process mein error aaya.");
+  }
+});
 
-    return ctx.reply(
-      "Reject process mein error aaya."
-    );
+// =====================================
+// PAYMENT HISTORY
+// =====================================
+
+async function showPaymentHistory(ctx, page = 0, edit = false) {
+  try {
+    const telegramId = String(ctx.from.id);
+    const perPage = 10;
+    const from = page * perPage;
+
+    const { data, error, count } = await supabase
+      .from("add_money_requests")
+      .select("id, amount, status, created_at", { count: "exact" })
+      .eq("telegram_id", telegramId)
+      .order("created_at", { ascending: false })
+      .range(from, from + perPage - 1);
+
+    if (error) throw error;
+
+    if (!data || data.length === 0) {
+      const message =
+        "📜 PAYMENT HISTORY\n\nAbhi aapki koi payment request nahi hai.";
+
+      return edit
+        ? ctx.editMessageText(message)
+        : ctx.reply(message);
+    }
+
+    const totalPages = Math.ceil(count / perPage);
+
+    let message =
+      "📜 YOUR PAYMENT HISTORY\n\n" +
+      `Total Requests: ${count}\n` +
+      `Page: ${page + 1}/${totalPages}\n\n`;
+
+    for (const item of data) {
+      const status = String(item.status).toLowerCase();
+
+      const statusText = {
+        pending: "🟡 PENDING",
+        approved: "🟢 APPROVED",
+        rejected: "🔴 REJECTED"
+      }[status] || status.toUpperCase();
+
+      const date = item.created_at
+        ? new Date(item.created_at).toLocaleString("en-IN", {
+            timeZone: "Asia/Kolkata"
+          })
+        : "Not available";
+
+      message +=
+        `🧾 Request ID: ${item.id}\n` +
+        `💰 Amount: ₹${item.amount}\n` +
+        `📅 Date: ${date}\n` +
+        `📌 Status: ${statusText}\n` +
+        "━━━━━━━━━━━━━━\n";
+    }
+
+    const buttons = [];
+
+    if (page > 0) {
+      buttons.push(
+        Markup.button.callback(
+          "⬅️ Previous",
+          `payment_history_${page - 1}`
+        )
+      );
+    }
+
+    if (page + 1 < totalPages) {
+      buttons.push(
+        Markup.button.callback(
+          "Next ➡️",
+          `payment_history_${page + 1}`
+        )
+      );
+    }
+
+    const keyboard = buttons.length
+      ? Markup.inlineKeyboard([buttons])
+      : undefined;
+
+    return edit
+      ? ctx.editMessageText(message, keyboard)
+      : ctx.reply(message, keyboard);
+
+  } catch (error) {
+    console.error("Payment history error:", error);
+    return ctx.reply("Payment History load nahi hui.");
+  }
+}
+
+bot.hears("Payment History 📜", async (ctx) => {
+  return showPaymentHistory(ctx);
+});
+
+bot.action(/^payment_history_(\d+)$/, async (ctx) => {
+  try {
+    await ctx.answerCbQuery();
+    return showPaymentHistory(ctx, Number(ctx.match[1]), true);
+  } catch (error) {
+    console.error(error);
+    return ctx.answerCbQuery("History load nahi hui.");
   }
 });
 
@@ -564,9 +649,7 @@ bot.hears("Check Balance 💳", async (ctx) => {
 
   } catch (error) {
     console.error("Balance error:", error);
-    return ctx.reply(
-      "Balance load nahi hua. Pehle /start karein."
-    );
+    return ctx.reply("Balance load nahi hua. Pehle /start karein.");
   }
 });
 
@@ -584,7 +667,10 @@ bot.start(async (ctx) => {
   }
 });
 
+// =====================================
 // ADMIN PANEL
+// =====================================
+
 bot.hears("Admin Panel ⚙️", async (ctx) => {
   if (!isAdmin(ctx)) return ctx.reply("Access denied.");
 
@@ -604,7 +690,6 @@ bot.hears("Admin Panel ⚙️", async (ctx) => {
   }
 });
 
-// REGISTRATION ON
 bot.hears("Registration ON 🟢", async (ctx) => {
   if (!isAdmin(ctx)) return ctx.reply("Access denied.");
 
@@ -621,7 +706,6 @@ bot.hears("Registration ON 🟢", async (ctx) => {
   return ctx.reply("Registration ON ho gaya! 🟢", adminPanelKeyboard());
 });
 
-// REGISTRATION OFF
 bot.hears("Registration OFF 🔴", async (ctx) => {
   if (!isAdmin(ctx)) return ctx.reply("Access denied.");
 
@@ -638,7 +722,239 @@ bot.hears("Registration OFF 🔴", async (ctx) => {
   return ctx.reply("Registration OFF ho gaya! 🔴", adminPanelKeyboard());
 });
 
-// START NEW
+// =====================================
+// MINUS VOTES
+// =====================================
+
+bot.hears("Minus Votes ➖", async (ctx) => {
+  if (!isAdmin(ctx)) return ctx.reply("Access denied.");
+
+  try {
+    const { data, error } = await supabase
+      .from("voting_participants")
+      .select("id, display_name, total_votes")
+      .order("total_votes", { ascending: false });
+
+    if (error) throw error;
+
+    if (!data || data.length === 0) {
+      return ctx.reply("Abhi koi participant nahi hai.");
+    }
+
+    const buttons = data.map(p => [
+      Markup.button.callback(
+        `${p.display_name.substring(0, 30)} (${p.total_votes})`,
+        `admin_minus_select_${p.id}`
+      )
+    ]);
+
+    return ctx.reply(
+      "➖ MINUS VOTES\n\nParticipant select karein:",
+      Markup.inlineKeyboard(buttons)
+    );
+
+  } catch (error) {
+    console.error("Minus Votes menu error:", error);
+    return ctx.reply("Minus Votes menu load nahi hua.");
+  }
+});
+
+bot.action(/^admin_minus_select_(\d+)$/, async (ctx) => {
+  if (!isAdmin(ctx)) {
+    return ctx.answerCbQuery("Access denied.", { show_alert: true });
+  }
+
+  const participantId = Number(ctx.match[1]);
+
+  const { data, error } = await supabase
+    .from("voting_participants")
+    .select("display_name, total_votes")
+    .eq("id", participantId)
+    .single();
+
+  if (error || !data) {
+    return ctx.answerCbQuery("Participant nahi mila.", {
+      show_alert: true
+    });
+  }
+
+  pendingAdminMinusVotes.set(String(ctx.from.id), participantId);
+
+  await ctx.answerCbQuery("Participant selected!");
+
+  return ctx.reply(
+    "➖ MINUS VOTES\n\n" +
+    `Participant: ${data.display_name}\n` +
+    `Current Votes: ${data.total_votes}\n\n` +
+    "Kitne votes kam karne hain? Number bhejein.\n" +
+    "Cancel karne ke liye /cancel bhejein."
+  );
+});
+
+// =====================================
+// REMOVE VOTER
+// =====================================
+
+bot.hears("Remove Voter ❌", async (ctx) => {
+  if (!isAdmin(ctx)) return ctx.reply("Access denied.");
+
+  try {
+    const { data, error } = await supabase
+      .from("voting_participants")
+      .select("id, display_name, total_votes")
+      .order("display_name", { ascending: true });
+
+    if (error) throw error;
+
+    if (!data || data.length === 0) {
+      return ctx.reply("Abhi koi participant nahi hai.");
+    }
+
+    const buttons = data.map(p => [
+      Markup.button.callback(
+        `❌ ${p.display_name.substring(0, 30)} (${p.total_votes})`,
+        `remove_voter_select_${p.id}`
+      )
+    ]);
+
+    return ctx.reply(
+      "❌ REMOVE VOTER\n\nParticipant select karein:",
+      Markup.inlineKeyboard(buttons)
+    );
+
+  } catch (error) {
+    console.error("Remove Voter menu error:", error);
+    return ctx.reply("Remove Voter menu load nahi hua.");
+  }
+});
+
+bot.action(/^remove_voter_select_(\d+)$/, async (ctx) => {
+  if (!isAdmin(ctx)) {
+    return ctx.answerCbQuery("Access denied.", { show_alert: true });
+  }
+
+  const id = Number(ctx.match[1]);
+
+  const { data, error } = await supabase
+    .from("voting_participants")
+    .select("display_name, total_votes")
+    .eq("id", id)
+    .single();
+
+  if (error || !data) {
+    return ctx.answerCbQuery("Participant nahi mila.", {
+      show_alert: true
+    });
+  }
+
+  await ctx.answerCbQuery();
+
+  return ctx.reply(
+    "⚠️ CONFIRM REMOVE VOTER\n\n" +
+    `Name: ${data.display_name}\n` +
+    `Votes: ${data.total_votes}\n\n` +
+    "Is participant ke sabhi Paid aur Free Votes aur dono Channel Posts remove honge.\n" +
+    "Payment History safe rahegi.",
+    Markup.inlineKeyboard([
+      [
+        Markup.button.callback("✅ CONFIRM REMOVE", `remove_voter_confirm_${id}`),
+        Markup.button.callback("❌ CANCEL", "remove_voter_cancel")
+      ]
+    ])
+  );
+});
+
+bot.action("remove_voter_cancel", async (ctx) => {
+  if (!isAdmin(ctx)) {
+    return ctx.answerCbQuery("Access denied.", { show_alert: true });
+  }
+
+  await ctx.answerCbQuery("Cancelled");
+  return ctx.editMessageText("Remove Voter cancel kar diya gaya hai.");
+});
+
+bot.action(/^remove_voter_confirm_(\d+)$/, async (ctx) => {
+  if (!isAdmin(ctx)) {
+    return ctx.answerCbQuery("Access denied.", { show_alert: true });
+  }
+
+  const participantId = Number(ctx.match[1]);
+
+  try {
+    await ctx.answerCbQuery("Participant remove ho raha hai...");
+
+    // Fetch channel message IDs before deleting database row
+    const { data: participant, error: fetchError } = await supabase
+      .from("voting_participants")
+      .select("display_name, channel_message_ids")
+      .eq("id", participantId)
+      .single();
+
+    if (fetchError) throw fetchError;
+
+    const result = await supabase.rpc("admin_remove_voter", {
+      p_participant_id: participantId
+    });
+
+    if (result.error) throw result.error;
+
+    if (!result.data || !result.data.success) {
+      return ctx.editMessageText(
+        result.data?.error === "PARTICIPANT_NOT_FOUND"
+          ? "Participant nahi mila."
+          : "Participant remove nahi hua."
+      );
+    }
+
+    // Delete this participant's posts from both channels
+    const messageIds = participant.channel_message_ids || {};
+    let deletedPosts = 0;
+
+    for (const channel of CHANNELS) {
+      const messageId = messageIds[channel.username];
+      if (!messageId) continue;
+
+      try {
+        await bot.telegram.deleteMessage(channel.username, messageId);
+        deletedPosts++;
+      } catch (error) {
+        console.error(
+          "Participant post delete failed:",
+          channel.username,
+          messageId,
+          error.description || error.message
+        );
+      }
+    }
+
+    // Clear any pending minus action for this participant
+    for (const [adminId, selectedId] of pendingAdminMinusVotes.entries()) {
+      if (selectedId === participantId) {
+        pendingAdminMinusVotes.delete(adminId);
+      }
+    }
+
+    return ctx.editMessageText(
+      "✅ PARTICIPANT REMOVED\n\n" +
+      `Name: ${participant.display_name}\n` +
+      "Paid vote records removed.\n" +
+      "Free vote records removed.\n" +
+      `Channel posts deleted: ${deletedPosts}/2\n\n` +
+      "Payment History safe hai."
+    );
+
+  } catch (error) {
+    console.error("Remove voter error:", error);
+    return ctx.editMessageText(
+      "Remove Voter process mein error aaya. Admin logs check karein."
+    );
+  }
+});
+
+// =====================================
+// START NEW ROUND
+// =====================================
+
 bot.hears("Start New 🔄", async (ctx) => {
   if (!isAdmin(ctx)) return ctx.reply("Access denied.");
 
@@ -655,7 +971,6 @@ bot.hears("Start New 🔄", async (ctx) => {
   );
 });
 
-// CANCEL NEW ROUND
 bot.action("cancel_new_round", async (ctx) => {
   if (!isAdmin(ctx)) {
     return ctx.answerCbQuery("Access denied.", { show_alert: true });
@@ -665,7 +980,6 @@ bot.action("cancel_new_round", async (ctx) => {
   return ctx.editMessageText("Start New cancel kar diya gaya hai.");
 });
 
-// CONFIRM NEW ROUND
 bot.action("confirm_new_round", async (ctx) => {
   if (!isAdmin(ctx)) {
     return ctx.answerCbQuery("Access denied.", { show_alert: true });
@@ -680,9 +994,7 @@ bot.action("confirm_new_round", async (ctx) => {
 
     if (fetchError) throw fetchError;
 
-    const { data, error } = await supabase.rpc(
-      "start_new_voting_round"
-    );
+    const { data, error } = await supabase.rpc("start_new_voting_round");
 
     if (error) throw error;
 
@@ -692,6 +1004,7 @@ bot.action("confirm_new_round", async (ctx) => {
 
     pendingVotes.clear();
     pendingRegistrations.clear();
+    pendingAdminMinusVotes.clear();
 
     await deleteOldChannelPosts(oldParticipants || []);
 
@@ -712,7 +1025,10 @@ bot.action("confirm_new_round", async (ctx) => {
   }
 });
 
+// =====================================
 // BACK TO MENU
+// =====================================
+
 bot.hears("Back to Menu", async (ctx) => {
   try {
     const fullName = await saveUser(ctx);
@@ -723,7 +1039,10 @@ bot.hears("Back to Menu", async (ctx) => {
   }
 });
 
+// =====================================
 // REGISTER NOW
+// =====================================
+
 bot.hears("Register Now 📝", async (ctx) => {
   try {
     const settings = await getSettings();
@@ -761,7 +1080,10 @@ bot.hears("Register Now 📝", async (ctx) => {
   }
 });
 
+// =====================================
 // SEE ALL PARTICIPANTS
+// =====================================
+
 async function showParticipants(ctx, page = 0, edit = false) {
   const from = page * PARTICIPANTS_PER_PAGE;
   const to = from + PARTICIPANTS_PER_PAGE - 1;
@@ -842,7 +1164,10 @@ bot.action(/^participants_page_(\d+)$/, async (ctx) => {
   }
 });
 
+// =====================================
 // ADD VOTES
+// =====================================
+
 bot.hears("Add Votes 🗳️", async (ctx) => {
   try {
     const { data: participants, error } = await supabase
@@ -876,7 +1201,10 @@ bot.hears("Add Votes 🗳️", async (ctx) => {
   }
 });
 
+// =====================================
 // FREE VOTE
+// =====================================
+
 bot.action(/^free_vote_(\d+)$/, async (ctx) => {
   try {
     const participantId = Number(ctx.match[1]);
@@ -919,7 +1247,10 @@ bot.action(/^free_vote_(\d+)$/, async (ctx) => {
   }
 });
 
+// =====================================
 // SELECT PARTICIPANT
+// =====================================
+
 bot.action(/^select_participant_(\d+)$/, async (ctx) => {
   try {
     const participantId = Number(ctx.match[1]);
@@ -958,7 +1289,10 @@ bot.action(/^select_participant_(\d+)$/, async (ctx) => {
   }
 });
 
-// HANDLE PAYMENT SCREENSHOT
+// =====================================
+// HANDLE PHOTO
+// =====================================
+
 bot.on("photo", async (ctx) => {
   const telegramId = String(ctx.from.id);
 
@@ -967,7 +1301,10 @@ bot.on("photo", async (ctx) => {
   return createMoneyRequest(ctx);
 });
 
+// =====================================
 // HANDLE USER TEXT
+// =====================================
+
 bot.on("text", async (ctx) => {
   const telegramId = String(ctx.from.id);
   const text = ctx.message.text.trim();
@@ -1084,6 +1421,60 @@ bot.on("text", async (ctx) => {
     }
   }
 
+  // ADMIN MINUS VOTES AMOUNT
+  if (pendingAdminMinusVotes.has(telegramId)) {
+    if (!isAdmin(ctx)) {
+      pendingAdminMinusVotes.delete(telegramId);
+      return ctx.reply("Access denied.");
+    }
+
+    if (!/^[1-9]\d*$/.test(text)) {
+      return ctx.reply("Sirf positive whole number bhejein.");
+    }
+
+    const votes = Number(text);
+
+    if (!Number.isSafeInteger(votes)) {
+      return ctx.reply("Invalid vote amount.");
+    }
+
+    const participantId = pendingAdminMinusVotes.get(telegramId);
+
+    try {
+      const result = await supabase.rpc("admin_minus_votes", {
+        p_participant_id: participantId,
+        p_votes: votes
+      });
+
+      if (result.error) throw result.error;
+
+      if (!result.data || !result.data.success) {
+        return ctx.reply(
+          result.data?.error === "NOT_ENOUGH_RECORDED_VOTES"
+            ? "Itne recorded votes available nahi hain."
+            : result.data?.error === "PARTICIPANT_NOT_FOUND"
+              ? "Participant nahi mila."
+              : "Minus Votes process nahi hua."
+        );
+      }
+
+      pendingAdminMinusVotes.delete(telegramId);
+
+      await updateChannelVoteCounts(participantId);
+
+      return ctx.reply(
+        "✅ VOTES REDUCED SUCCESSFULLY\n\n" +
+        `Votes removed: ${result.data.removed_votes}\n` +
+        `Remaining votes: ${result.data.remaining_votes}`,
+        adminKeyboard()
+      );
+
+    } catch (error) {
+      console.error("Admin minus votes error:", error);
+      return ctx.reply("Minus Votes mein technical error aaya.");
+    }
+  }
+
   // VOTE AMOUNT
   if (!pendingVotes.has(telegramId)) return;
 
@@ -1145,17 +1536,22 @@ bot.on("text", async (ctx) => {
   }
 });
 
+// =====================================
 // HOME
+// =====================================
+
 app.get("/", (req, res) => {
   res.send("DEMONS VOTING BOT is running");
 });
 
-// HEALTH
 app.get("/health", (req, res) => {
   res.json({ ok: true });
 });
 
+// =====================================
 // WEBHOOK
+// =====================================
+
 app.post("/telegram", async (req, res) => {
   try {
     await bot.handleUpdate(req.body);
@@ -1166,7 +1562,10 @@ app.post("/telegram", async (req, res) => {
   }
 });
 
+// =====================================
 // SERVER START
+// =====================================
+
 app.listen(PORT, async () => {
   console.log(`DEMONS VOTING BOT running on port ${PORT}`);
 
