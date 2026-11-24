@@ -1,3 +1,4 @@
+
 const express = require("express");
 const { Telegraf, Markup } = require("telegraf");
 const { createClient } = require("@supabase/supabase-js");
@@ -18,6 +19,25 @@ if (!BOT_TOKEN || !SUPABASE_URL || !SUPABASE_SECRET_KEY) {
 
 const supabase = createClient(SUPABASE_URL, SUPABASE_SECRET_KEY);
 const bot = new Telegraf(BOT_TOKEN);
+
+// CALLBACK LOGGER AND GLOBAL ERROR HANDLER
+bot.use(async (ctx, next) => {
+  if (ctx.callbackQuery) {
+    console.log(
+      "CALLBACK RECEIVED:",
+      ctx.callbackQuery.data,
+      "USER:",
+      ctx.from?.id
+    );
+  }
+
+  return next();
+});
+
+bot.catch((error, ctx) => {
+  console.error("BOT HANDLER ERROR:", error);
+  console.error("UPDATE TYPE:", ctx.updateType);
+});
 
 const ADMIN_IDS = ["7927224931", "8789888284"];
 
@@ -161,7 +181,7 @@ async function updateChannelVoteCounts(participantId) {
 
       return bot.telegram.editMessageReplyMarkup(
         channel.username,
-        messageId,
+        Number(messageId),
         undefined,
         channelVoteKeyboard(
           participantId,
@@ -803,40 +823,50 @@ bot.hears("Minus Votes ➖", async (ctx) => {
   }
 });
 
-bot.action(/^admin_minus_select_(\d+)$/, async (ctx) => {
+bot.action(/^admin_minus_select_(.+)$/, async (ctx) => {
   if (!isAdmin(ctx)) {
     return ctx.answerCbQuery("Access denied.", { show_alert: true });
   }
 
-  const participantId = Number(ctx.match[1]);
+  const participantId = ctx.match[1];
 
-  const { data, error } = await supabase
-    .from("voting_participants")
-    .select("display_name, total_votes")
-    .eq("id", participantId)
-    .single();
+  try {
+    const { data, error } = await supabase
+      .from("voting_participants")
+      .select("display_name, total_votes")
+      .eq("id", participantId)
+      .single();
 
-  if (error || !data) {
-    return ctx.answerCbQuery("Participant nahi mila.", {
+    if (error) throw error;
+
+    if (!data) {
+      return ctx.answerCbQuery("Participant nahi mila.", {
+        show_alert: true
+      });
+    }
+
+    pendingAdminMinusVotes.set(String(ctx.from.id), participantId);
+
+    await ctx.answerCbQuery("Participant selected!");
+
+    return ctx.reply(
+      "➖ MINUS VOTES\n\n" +
+      `Participant: ${data.display_name}\n` +
+      `Current Votes: ${data.total_votes}\n\n` +
+      "Kitne votes kam karne hain? Number bhejein.\n" +
+      "Cancel karne ke liye /cancel bhejein."
+    );
+
+  } catch (error) {
+    console.error("Minus select error:", error);
+    return ctx.answerCbQuery("Participant select nahi hua.", {
       show_alert: true
     });
   }
-
-  pendingAdminMinusVotes.set(String(ctx.from.id), participantId);
-
-  await ctx.answerCbQuery("Participant selected!");
-
-  return ctx.reply(
-    "➖ MINUS VOTES\n\n" +
-    `Participant: ${data.display_name}\n` +
-    `Current Votes: ${data.total_votes}\n\n` +
-    "Kitne votes kam karne hain? Number bhejein.\n" +
-    "Cancel karne ke liye /cancel bhejein."
-  );
 });
 
 // =====================================
-// REMOVE VOTER
+// REMOVE VOTER - FIXED
 // =====================================
 
 bot.hears("Remove Voter ❌", async (ctx) => {
@@ -856,7 +886,7 @@ bot.hears("Remove Voter ❌", async (ctx) => {
 
     const buttons = data.map(p => [
       Markup.button.callback(
-        `❌ ${p.display_name.substring(0, 30)} (${p.total_votes})`,
+        `❌ ${String(p.display_name).substring(0, 30)} (${p.total_votes})`,
         `remove_voter_select_${p.id}`
       )
     ]);
@@ -872,71 +902,106 @@ bot.hears("Remove Voter ❌", async (ctx) => {
   }
 });
 
-bot.action(/^remove_voter_select_(\d+)$/, async (ctx) => {
+bot.action(/^remove_voter_select_(.+)$/, async (ctx) => {
   if (!isAdmin(ctx)) {
-    return ctx.answerCbQuery("Access denied.", { show_alert: true });
-  }
-
-  const id = Number(ctx.match[1]);
-
-  const { data, error } = await supabase
-    .from("voting_participants")
-    .select("display_name, total_votes")
-    .eq("id", id)
-    .single();
-
-  if (error || !data) {
-    return ctx.answerCbQuery("Participant nahi mila.", {
+    return ctx.answerCbQuery("Access denied.", {
       show_alert: true
     });
   }
 
-  await ctx.answerCbQuery();
+  const participantId = ctx.match[1];
 
-  return ctx.reply(
-    "⚠️ CONFIRM REMOVE VOTER\n\n" +
-    `Name: ${data.display_name}\n` +
-    `Votes: ${data.total_votes}\n\n` +
-    "Is participant ke sabhi Paid aur Free Votes aur Channel Post remove honge.\n" +
-    "Payment History safe rahegi.",
-    Markup.inlineKeyboard([
-      [
-        Markup.button.callback("✅ CONFIRM REMOVE", `remove_voter_confirm_${id}`),
-        Markup.button.callback("❌ CANCEL", "remove_voter_cancel")
-      ]
-    ])
-  );
+  try {
+    console.log("REMOVE SELECT CALLBACK:", participantId);
+
+    await ctx.answerCbQuery("Participant selected!");
+
+    const { data, error } = await supabase
+      .from("voting_participants")
+      .select("id, display_name, total_votes")
+      .eq("id", participantId)
+      .maybeSingle();
+
+    if (error) throw error;
+
+    if (!data) {
+      return ctx.reply("Participant nahi mila.");
+    }
+
+    return ctx.reply(
+      "⚠️ CONFIRM REMOVE VOTER\n\n" +
+      `Name: ${data.display_name}\n` +
+      `Votes: ${data.total_votes}\n\n` +
+      "Is participant ke sabhi Paid aur Free Votes aur Channel Post remove honge.\n" +
+      "Payment History safe rahegi.\n\n" +
+      "Kya aap sure hain?",
+      Markup.inlineKeyboard([
+        [
+          Markup.button.callback(
+            "✅ CONFIRM REMOVE",
+            `remove_voter_confirm_${participantId}`
+          )
+        ],
+        [
+          Markup.button.callback(
+            "❌ CANCEL",
+            "remove_voter_cancel"
+          )
+        ]
+      ])
+    );
+
+  } catch (error) {
+    console.error("Remove select error:", error);
+
+    return ctx.reply(
+      "Participant select nahi hua.\n" +
+      "Error: " + (error.message || "Unknown error")
+    );
+  }
 });
 
 bot.action("remove_voter_cancel", async (ctx) => {
   if (!isAdmin(ctx)) {
-    return ctx.answerCbQuery("Access denied.", { show_alert: true });
+    return ctx.answerCbQuery("Access denied.", {
+      show_alert: true
+    });
   }
 
   await ctx.answerCbQuery("Cancelled");
-  return ctx.editMessageText("Remove Voter cancel kar diya gaya hai.");
+
+  return ctx.editMessageText(
+    "Remove Voter cancel kar diya gaya hai."
+  );
 });
 
-bot.action(/^remove_voter_confirm_(\d+)$/, async (ctx) => {
+bot.action(/^remove_voter_confirm_(.+)$/, async (ctx) => {
   if (!isAdmin(ctx)) {
-    return ctx.answerCbQuery("Access denied.", { show_alert: true });
+    return ctx.answerCbQuery("Access denied.", {
+      show_alert: true
+    });
   }
 
-  const participantId = Number(ctx.match[1]);
+  const participantId = ctx.match[1];
 
   try {
-    await ctx.answerCbQuery("Participant remove ho raha hai...");
+    console.log("REMOVE CONFIRM CALLBACK:", participantId);
 
-    // Fetch participant and message IDs before database deletion
+    await ctx.answerCbQuery("Removing participant...");
+
     const { data: participant, error: fetchError } = await supabase
       .from("voting_participants")
-      .select("display_name, channel_message_ids")
+      .select("id, display_name, channel_message_ids")
       .eq("id", participantId)
-      .single();
+      .maybeSingle();
 
     if (fetchError) throw fetchError;
 
-    // Delete channel post first, so its ID remains available if deletion fails
+    if (!participant) {
+      return ctx.editMessageText("Participant nahi mila.");
+    }
+
+    // Delete channel post first
     const deleteResults = await deleteParticipantChannelPosts(
       participant.channel_message_ids
     );
@@ -949,21 +1014,22 @@ bot.action(/^remove_voter_confirm_(\d+)$/, async (ctx) => {
       result => !result.success
     );
 
-    // Do not delete participant record if Telegram post deletion failed
+    // If channel deletion fails, keep database record
     if (failedPosts.length > 0) {
+      console.error("Channel deletion incomplete:", failedPosts);
+
       return ctx.editMessageText(
         "⚠️ CHANNEL POST DELETE NAHI HUI\n\n" +
         `Name: ${participant.display_name}\n` +
         `Deleted posts: ${deletedPosts}/1\n\n` +
-        "Participant database se remove nahi hua hai.\n" +
+        "Participant database se remove nahi hua hai.\n\n" +
         "Bot ko channel admin banayein aur Delete Messages permission dein.\n\n" +
-        "Permission fix karne ke baad dobara Remove Voter try karein.\n\n" +
         "Error:\n" +
         failedPosts.map(p => p.reason).join("\n")
       );
     }
 
-    // Remove participant and associated vote records through existing RPC
+    // Existing Supabase RPC
     const result = await supabase.rpc("admin_remove_voter", {
       p_participant_id: participantId
     });
@@ -971,22 +1037,24 @@ bot.action(/^remove_voter_confirm_(\d+)$/, async (ctx) => {
     if (result.error) throw result.error;
 
     if (!result.data || !result.data.success) {
+      console.error("Remove RPC response:", result.data);
+
       return ctx.editMessageText(
         result.data?.error === "PARTICIPANT_NOT_FOUND"
           ? "Participant nahi mila."
-          : "Participant remove nahi hua."
+          : "Participant database se remove nahi hua."
       );
     }
 
-    // Clear pending minus action for this participant
+    // Clear pending minus-vote selections
     for (const [adminId, selectedId] of pendingAdminMinusVotes.entries()) {
-      if (selectedId === participantId) {
+      if (String(selectedId) === String(participantId)) {
         pendingAdminMinusVotes.delete(adminId);
       }
     }
 
     return ctx.editMessageText(
-      "✅ PARTICIPANT REMOVED\n\n" +
+      "✅ PARTICIPANT REMOVED SUCCESSFULLY\n\n" +
       `Name: ${participant.display_name}\n` +
       "Paid vote records removed.\n" +
       "Free vote records removed.\n" +
@@ -995,9 +1063,12 @@ bot.action(/^remove_voter_confirm_(\d+)$/, async (ctx) => {
     );
 
   } catch (error) {
-    console.error("Remove voter error:", error);
+    console.error("Remove voter confirm error:", error);
+
     return ctx.editMessageText(
-      "Remove Voter process mein error aaya. Admin logs check karein."
+      "❌ REMOVE VOTER ERROR\n\n" +
+      (error.message || "Unknown error") +
+      "\n\nRender Logs check karein."
     );
   }
 });
@@ -1256,9 +1327,9 @@ bot.hears("Add Votes 🗳️", async (ctx) => {
 // FREE VOTE
 // =====================================
 
-bot.action(/^free_vote_(\d+)$/, async (ctx) => {
+bot.action(/^free_vote_(.+)$/, async (ctx) => {
   try {
-    const participantId = Number(ctx.match[1]);
+    const participantId = ctx.match[1];
     const telegramId = String(ctx.from.id);
 
     const result = await supabase.rpc("cast_free_vote", {
@@ -1302,9 +1373,9 @@ bot.action(/^free_vote_(\d+)$/, async (ctx) => {
 // SELECT PARTICIPANT
 // =====================================
 
-bot.action(/^select_participant_(\d+)$/, async (ctx) => {
+bot.action(/^select_participant_(.+)$/, async (ctx) => {
   try {
-    const participantId = Number(ctx.match[1]);
+    const participantId = ctx.match[1];
 
     const { data: participant, error } = await supabase
       .from("voting_participants")
