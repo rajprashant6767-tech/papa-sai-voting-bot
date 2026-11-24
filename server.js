@@ -20,7 +20,10 @@ if (!BOT_TOKEN || !SUPABASE_URL || !SUPABASE_SECRET_KEY) {
 const supabase = createClient(SUPABASE_URL, SUPABASE_SECRET_KEY);
 const bot = new Telegraf(BOT_TOKEN);
 
-// CALLBACK LOGGER AND GLOBAL ERROR HANDLER
+// =====================================
+// CALLBACK LOGGER AND ERROR HANDLER
+// =====================================
+
 bot.use(async (ctx, next) => {
   if (ctx.callbackQuery) {
     console.log(
@@ -44,7 +47,6 @@ const ADMIN_IDS = ["7927224931", "8789888284"];
 const UPI_ID = "raj-prashant@fam";
 const ACCOUNT_NAME = "Prashant Raj";
 
-// ONLY ONE CHANNEL
 const CHANNELS = [
   {
     username: "@DEMONS_GIVEAWAY_2026_27",
@@ -60,8 +62,40 @@ const pendingAdminMinusVotes = new Map();
 
 const PARTICIPANTS_PER_PAGE = 20;
 
+// =====================================
+// ADMIN AND MEMBERSHIP HELPERS
+// =====================================
+
 function isAdmin(ctx) {
   return ADMIN_IDS.includes(String(ctx.from.id));
+}
+
+function isChannelMember(member) {
+  if (!member) return false;
+
+  if (
+    member.status === "creator" ||
+    member.status === "administrator" ||
+    member.status === "member"
+  ) {
+    return true;
+  }
+
+  return (
+    member.status === "restricted" &&
+    member.is_member === true
+  );
+}
+
+async function checkChannelMembership(telegramId) {
+  const channel = CHANNELS[0];
+
+  const member = await bot.telegram.getChatMember(
+    channel.username,
+    Number(telegramId)
+  );
+
+  return isChannelMember(member);
 }
 
 // =====================================
@@ -866,7 +900,7 @@ bot.action(/^admin_minus_select_(.+)$/, async (ctx) => {
 });
 
 // =====================================
-// REMOVE VOTER - FIXED
+// REMOVE VOTER
 // =====================================
 
 bot.hears("Remove Voter ❌", async (ctx) => {
@@ -1001,7 +1035,6 @@ bot.action(/^remove_voter_confirm_(.+)$/, async (ctx) => {
       return ctx.editMessageText("Participant nahi mila.");
     }
 
-    // Delete channel post first
     const deleteResults = await deleteParticipantChannelPosts(
       participant.channel_message_ids
     );
@@ -1014,7 +1047,6 @@ bot.action(/^remove_voter_confirm_(.+)$/, async (ctx) => {
       result => !result.success
     );
 
-    // If channel deletion fails, keep database record
     if (failedPosts.length > 0) {
       console.error("Channel deletion incomplete:", failedPosts);
 
@@ -1029,7 +1061,6 @@ bot.action(/^remove_voter_confirm_(.+)$/, async (ctx) => {
       );
     }
 
-    // Existing Supabase RPC
     const result = await supabase.rpc("admin_remove_voter", {
       p_participant_id: participantId
     });
@@ -1046,7 +1077,6 @@ bot.action(/^remove_voter_confirm_(.+)$/, async (ctx) => {
       );
     }
 
-    // Clear pending minus-vote selections
     for (const [adminId, selectedId] of pendingAdminMinusVotes.entries()) {
       if (String(selectedId) === String(participantId)) {
         pendingAdminMinusVotes.delete(adminId);
@@ -1324,13 +1354,60 @@ bot.hears("Add Votes 🗳️", async (ctx) => {
 });
 
 // =====================================
-// FREE VOTE
+// FREE VOTE - MEMBERSHIP CHECK
 // =====================================
 
-bot.action(/^free_vote_(.+)$/, async (ctx) => {
+bot.action(/^free_vote_(\d+)$/, async (ctx) => {
   try {
     const participantId = ctx.match[1];
     const telegramId = String(ctx.from.id);
+
+    let isMember;
+
+    try {
+      isMember = await checkChannelMembership(telegramId);
+    } catch (membershipError) {
+      console.error(
+        "Membership check error:",
+        membershipError
+      );
+
+      return ctx.answerCbQuery(
+        "Membership verify nahi ho paayi. Thodi der baad dobara try karein.",
+        { show_alert: true }
+      );
+    }
+
+    if (!isMember) {
+      await ctx.answerCbQuery(
+        "Pehle DEMONS GIVEAWAY channel join karein. Uske baad dobara vote karein.",
+        { show_alert: true }
+      );
+
+      // DM join link if user has already started the bot
+      try {
+        await bot.telegram.sendMessage(
+          telegramId,
+          "⚠️ FREE VOTE KE LIYE CHANNEL JOIN ZAROORI HAI\n\n" +
+          "Pehle hamara channel join karein. Join karne ke baad channel post par wapas jaakar Vote button dabayein.",
+          Markup.inlineKeyboard([
+            [
+              Markup.button.url(
+                "📢 JOIN CHANNEL",
+                CHANNELS[0].link
+              )
+            ]
+          ])
+        );
+      } catch (dmError) {
+        console.log(
+          "Join reminder DM unavailable:",
+          dmError.description || dmError.message
+        );
+      }
+
+      return;
+    }
 
     const result = await supabase.rpc("cast_free_vote", {
       p_voter_telegram_id: telegramId,
@@ -1339,6 +1416,7 @@ bot.action(/^free_vote_(.+)$/, async (ctx) => {
 
     if (result.error) {
       console.error("Free vote RPC error:", result.error);
+
       return ctx.answerCbQuery("Vote process nahi hua.", {
         show_alert: true
       });
@@ -1363,9 +1441,94 @@ bot.action(/^free_vote_(.+)$/, async (ctx) => {
 
   } catch (error) {
     console.error("Free vote error:", error);
-    return ctx.answerCbQuery("Technical problem. Dobara try karein.", {
-      show_alert: true
-    });
+
+    return ctx.answerCbQuery(
+      "Technical problem. Dobara try karein.",
+      { show_alert: true }
+    );
+  }
+});
+
+// =====================================
+// AUTOMATIC FREE VOTE REVERSAL
+// =====================================
+
+bot.on("chat_member", async (ctx) => {
+  try {
+    const update = ctx.update.chat_member;
+
+    if (!update) return;
+
+    const chatUsername = update.chat.username
+      ? "@" + update.chat.username
+      : "";
+
+    const requiredChannel = CHANNELS[0].username;
+
+    if (
+      chatUsername.toLowerCase() !==
+      requiredChannel.toLowerCase()
+    ) {
+      return;
+    }
+
+    const oldMember = update.old_chat_member;
+    const newMember = update.new_chat_member;
+
+    const wasMember = isChannelMember(oldMember);
+    const isMemberNow = isChannelMember(newMember);
+
+    // Only reverse when an existing member leaves or is removed
+    if (!wasMember || isMemberNow) return;
+
+    const telegramId = String(newMember.user.id);
+
+    console.log(
+      "CHANNEL MEMBER LEFT:",
+      telegramId
+    );
+
+    const result = await supabase.rpc(
+      "reverse_free_vote",
+      {
+        p_voter_telegram_id: telegramId
+      }
+    );
+
+    if (result.error) {
+      console.error(
+        "Free vote reversal RPC error:",
+        result.error
+      );
+      return;
+    }
+
+    if (!result.data || !result.data.success) {
+      console.log(
+        "No active free vote to reverse:",
+        telegramId
+      );
+      return;
+    }
+
+    const participantId = result.data.participant_id;
+
+    await updateChannelVoteCounts(participantId);
+
+    console.log(
+      "FREE VOTE REVERSED:",
+      telegramId,
+      "PARTICIPANT:",
+      participantId,
+      "NEW TOTAL:",
+      result.data.total_votes
+    );
+
+  } catch (error) {
+    console.error(
+      "Automatic free vote reversal error:",
+      error
+    );
   }
 });
 
@@ -1694,10 +1857,17 @@ app.listen(PORT, async () => {
   if (APP_URL) {
     try {
       await bot.telegram.setWebhook(
-        `${APP_URL.replace(/\/$/, "")}/telegram`
+        `${APP_URL.replace(/\/$/, "")}/telegram`,
+        {
+          allowed_updates: [
+            "message",
+            "callback_query",
+            "chat_member"
+          ]
+        }
       );
 
-      console.log("Webhook configured");
+      console.log("Webhook configured with chat_member updates");
     } catch (error) {
       console.error("Webhook setup error:", error);
     }
