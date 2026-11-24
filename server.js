@@ -1,4 +1,3 @@
-
 const express = require("express");
 const { Telegraf, Markup } = require("telegraf");
 const { createClient } = require("@supabase/supabase-js");
@@ -25,14 +24,11 @@ const ADMIN_IDS = ["7927224931", "8789888284"];
 const UPI_ID = "raj-prashant@fam";
 const ACCOUNT_NAME = "Prashant Raj";
 
+// ONLY ONE CHANNEL
 const CHANNELS = [
   {
     username: "@DEMONS_GIVEAWAY_2026_27",
     link: "https://t.me/DEMONS_GIVEAWAY_2026_27"
-  },
-  {
-    username: "@ZyloBet",
-    link: "https://t.me/ZyloBet"
   }
 ];
 
@@ -212,6 +208,54 @@ async function publishParticipant(participant) {
   if (error) throw error;
 }
 
+async function deleteParticipantChannelPosts(messageIds) {
+  const results = [];
+
+  for (const channel of CHANNELS) {
+    const messageId = messageIds?.[channel.username];
+
+    if (!messageId) {
+      results.push({
+        channel: channel.username,
+        success: false,
+        reason: "MESSAGE_ID_NOT_FOUND"
+      });
+      continue;
+    }
+
+    try {
+      await bot.telegram.deleteMessage(
+        channel.username,
+        Number(messageId)
+      );
+
+      results.push({
+        channel: channel.username,
+        success: true
+      });
+
+    } catch (error) {
+      const description =
+        error.description || error.message || "Unknown Telegram error";
+
+      console.error(
+        "Participant post deletion failed:",
+        channel.username,
+        messageId,
+        description
+      );
+
+      results.push({
+        channel: channel.username,
+        success: false,
+        reason: description
+      });
+    }
+  }
+
+  return results;
+}
+
 async function deleteOldChannelPosts(participants) {
   for (const participant of participants) {
     const messageIds = participant.channel_message_ids || {};
@@ -224,7 +268,7 @@ async function deleteOldChannelPosts(participants) {
       try {
         await bot.telegram.deleteMessage(
           channel.username,
-          messageId
+          Number(messageId)
         );
       } catch (error) {
         console.error(
@@ -853,7 +897,7 @@ bot.action(/^remove_voter_select_(\d+)$/, async (ctx) => {
     "⚠️ CONFIRM REMOVE VOTER\n\n" +
     `Name: ${data.display_name}\n` +
     `Votes: ${data.total_votes}\n\n` +
-    "Is participant ke sabhi Paid aur Free Votes aur dono Channel Posts remove honge.\n" +
+    "Is participant ke sabhi Paid aur Free Votes aur Channel Post remove honge.\n" +
     "Payment History safe rahegi.",
     Markup.inlineKeyboard([
       [
@@ -883,7 +927,7 @@ bot.action(/^remove_voter_confirm_(\d+)$/, async (ctx) => {
   try {
     await ctx.answerCbQuery("Participant remove ho raha hai...");
 
-    // Fetch channel message IDs before deleting database row
+    // Fetch participant and message IDs before database deletion
     const { data: participant, error: fetchError } = await supabase
       .from("voting_participants")
       .select("display_name, channel_message_ids")
@@ -892,6 +936,34 @@ bot.action(/^remove_voter_confirm_(\d+)$/, async (ctx) => {
 
     if (fetchError) throw fetchError;
 
+    // Delete channel post first, so its ID remains available if deletion fails
+    const deleteResults = await deleteParticipantChannelPosts(
+      participant.channel_message_ids
+    );
+
+    const deletedPosts = deleteResults.filter(
+      result => result.success
+    ).length;
+
+    const failedPosts = deleteResults.filter(
+      result => !result.success
+    );
+
+    // Do not delete participant record if Telegram post deletion failed
+    if (failedPosts.length > 0) {
+      return ctx.editMessageText(
+        "⚠️ CHANNEL POST DELETE NAHI HUI\n\n" +
+        `Name: ${participant.display_name}\n` +
+        `Deleted posts: ${deletedPosts}/1\n\n` +
+        "Participant database se remove nahi hua hai.\n" +
+        "Bot ko channel admin banayein aur Delete Messages permission dein.\n\n" +
+        "Permission fix karne ke baad dobara Remove Voter try karein.\n\n" +
+        "Error:\n" +
+        failedPosts.map(p => p.reason).join("\n")
+      );
+    }
+
+    // Remove participant and associated vote records through existing RPC
     const result = await supabase.rpc("admin_remove_voter", {
       p_participant_id: participantId
     });
@@ -906,28 +978,7 @@ bot.action(/^remove_voter_confirm_(\d+)$/, async (ctx) => {
       );
     }
 
-    // Delete this participant's posts from both channels
-    const messageIds = participant.channel_message_ids || {};
-    let deletedPosts = 0;
-
-    for (const channel of CHANNELS) {
-      const messageId = messageIds[channel.username];
-      if (!messageId) continue;
-
-      try {
-        await bot.telegram.deleteMessage(channel.username, messageId);
-        deletedPosts++;
-      } catch (error) {
-        console.error(
-          "Participant post delete failed:",
-          channel.username,
-          messageId,
-          error.description || error.message
-        );
-      }
-    }
-
-    // Clear any pending minus action for this participant
+    // Clear pending minus action for this participant
     for (const [adminId, selectedId] of pendingAdminMinusVotes.entries()) {
       if (selectedId === participantId) {
         pendingAdminMinusVotes.delete(adminId);
@@ -939,7 +990,7 @@ bot.action(/^remove_voter_confirm_(\d+)$/, async (ctx) => {
       `Name: ${participant.display_name}\n` +
       "Paid vote records removed.\n" +
       "Free vote records removed.\n" +
-      `Channel posts deleted: ${deletedPosts}/2\n\n` +
+      `Channel posts deleted: ${deletedPosts}/1\n\n` +
       "Payment History safe hai."
     );
 
@@ -1070,7 +1121,7 @@ bot.hears("Register Now 📝", async (ctx) => {
     return ctx.reply(
       "📝 DEMONS GIVEAWAY REGISTRATION\n\n" +
       "Apna display name type karke send karein.\n\n" +
-      "Aap jo naam bhejenge, wahi dono channels par show hoga.\n" +
+      "Aap jo naam bhejenge, wahi channel par show hoga.\n" +
       "Aapki Telegram ID automatically add hogi."
     );
 
@@ -1411,7 +1462,7 @@ bot.on("text", async (ctx) => {
           : "🎉 Registration successful!\n\n" +
             `Name: ${text}\n` +
             `Telegram ID: ${telegramId}\n\n` +
-            "Dono channels par aapka post publish ho gaya hai.",
+            "Channel par aapka post publish ho gaya hai.",
         isAdmin(ctx) ? adminKeyboard() : userKeyboard()
       );
 
