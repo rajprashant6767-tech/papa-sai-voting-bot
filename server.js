@@ -59,34 +59,82 @@ async function supabaseRpc(functionName, params = {}) {
 }
 
 // =====================================
+// BUTTON LABELS
+// =====================================
+
+const BUTTONS = {
+  owner: {
+    addChannel: "➕ Add Channel",
+    manageChannels: "📢 Manage Channels",
+    announcement: "📣 Announcement",
+    allUsers: "👥 All Users",
+    channelAdmins: "🛡️ Manage Channel Admins",
+    globalUsers: "👤 Global User Management",
+    payments: "💳 Payment Management",
+    promos: "🎁 Global Promo Management",
+    reports: "📊 Global Reports",
+    channelSettings: "⚙️ Channel Settings",
+    scanners: "🔍 Manage Scanners",
+    logs: "📋 Bot Activity Logs",
+    history: "📜 Broadcast History",
+    status: "🤖 Bot Status",
+    settings: "🛠️ Bot Settings"
+  },
+
+  user: {
+    addMoney: "💵 Add Money",
+    register: "📝 Register Now",
+    addVotes: "🗳️ Add Votes",
+    balance: "💰 Check Balance",
+    participants: "👥 All Participants",
+    paymentHistory: "🧾 Payment History",
+    walletHistory: "📜 Wallet History",
+    leaderboard: "🏆 Leaderboard",
+    promo: "🎁 Redeem Promo",
+    profile: "👤 My Profile"
+  }
+};
+
+// =====================================
 // MENUS
 // =====================================
 
 function ownerKeyboard() {
+  const b = BUTTONS.owner;
+
   return Markup.keyboard([
-    ["Add Channel", "Manage Channels"],
-    ["Announcement", "All Users"],
-    ["Manage Channel Admins", "Global User Management"],
-    ["Payment Management", "Global Promo Management"],
-    ["Global Reports", "Channel Settings"],
-    ["Manage Scanners", "Bot Activity Logs"],
-    ["Broadcast History", "Bot Status"],
-    ["Bot Settings"]
+    [b.addChannel, b.manageChannels],
+    [b.announcement, b.allUsers],
+    [b.channelAdmins, b.globalUsers],
+    [b.payments, b.promos],
+    [b.reports, b.channelSettings],
+    [b.scanners, b.logs],
+    [b.history, b.status],
+    [b.settings]
   ]).resize();
 }
 
 function userKeyboard() {
+  const b = BUTTONS.user;
+
   return Markup.keyboard([
-    ["Add Money", "Register Now"],
-    ["Add Votes", "Check Balance"],
-    ["All Participants", "Payment History"],
-    ["Wallet History", "Leaderboard"],
-    ["Redeem Promo", "My Profile"]
+    [b.addMoney, b.register],
+    [b.addVotes, b.balance],
+    [b.participants, b.paymentHistory],
+    [b.walletHistory, b.leaderboard],
+    [b.promo, b.profile]
   ]).resize();
 }
 
 function isOwner(ctx) {
   return String(ctx.from?.id) === OWNER_ID;
+}
+
+// Remove leading emoji/symbols before matching button text.
+function normalizeButtonText(value) {
+  return String(value || "")
+    .replace(/^[^\p{L}\p{N}]+/u, "")
+    .trim();
 }
 
 async function showMainMenu(ctx) {
@@ -348,6 +396,7 @@ bot.on("text", async (ctx) => {
 
   const session = sessions.get(userId);
 
+  // Process active input sessions before button matching.
   if (session) {
     if (session.action === "add_channel") {
       if (!isOwner(ctx)) {
@@ -359,15 +408,20 @@ bot.on("text", async (ctx) => {
     }
   }
 
-  if (text === "Add Channel") {
+  // Normalize emoji-prefixed keyboard labels.
+  const commandText = normalizeButtonText(text);
+  const ownerButtons = BUTTONS.owner;
+  const userButtons = BUTTONS.user;
+
+  if (commandText === "Add Channel" && isOwner(ctx)) {
     return startAddChannel(ctx);
   }
 
-  if (text === "Manage Channels") {
+  if (commandText === "Manage Channels" && isOwner(ctx)) {
     return showManageChannels(ctx);
   }
 
-  if (text === "Bot Status" && isOwner(ctx)) {
+  if (commandText === "Bot Status" && isOwner(ctx)) {
     try {
       const me = await bot.telegram.getMe();
       const webhook = await bot.telegram.getWebhookInfo();
@@ -378,7 +432,8 @@ bot.on("text", async (ctx) => {
         `Username: @${me.username}\n` +
         `Webhook: ${webhook.url ? "Active" : "Inactive"}\n` +
         `Pending Updates: ${webhook.pending_update_count || 0}\n` +
-        `Database: Connected configuration`
+        "Database: Connected configuration",
+        ownerKeyboard()
       );
     } catch (error) {
       console.error("Bot status error:", error);
@@ -386,27 +441,44 @@ bot.on("text", async (ctx) => {
     }
   }
 
-  const implementedButtons = [
+  const implementedOwnerButtons = [
     "Add Channel",
     "Manage Channels",
     "Bot Status"
   ];
 
-  if (isOwner(ctx) && !implementedButtons.includes(text)) {
+  if (isOwner(ctx)) {
+    const ownerLabels = Object.values(ownerButtons).map(normalizeButtonText);
+
+    if (ownerLabels.includes(commandText) &&
+        !implementedOwnerButtons.includes(commandText)) {
+      return ctx.reply(
+        "⏳ Ye feature abhi implement nahi hua hai.\n\n" +
+        "Iska actual function agle development step mein add hoga.",
+        ownerKeyboard()
+      );
+    }
+
     return ctx.reply(
-      "⏳ Ye feature abhi implement nahi hua hai.\n\n" +
-      "Iska actual function agle development step mein add hoga.",
+      "Menu se koi option select karein.",
       ownerKeyboard()
     );
   }
 
-  if (!isOwner(ctx)) {
+  const userLabels = Object.values(userButtons).map(normalizeButtonText);
+
+  if (userLabels.includes(commandText)) {
     return ctx.reply(
       "⏳ Ye feature abhi available nahi hai.\n\n" +
       "Kripya baad mein try karein.",
       userKeyboard()
     );
   }
+
+  return ctx.reply(
+    "Menu se koi option select karein.",
+    userKeyboard()
+  );
 });
 
 // =====================================
