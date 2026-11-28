@@ -1,7 +1,8 @@
+
 {
-  "name": "demons-voting-bot",
+  "name": "zyntra-bot",
   "version": "1.0.0",
-  "description": "DEMONS multi-channel Telegram voting bot",
+  "description": "ZYNTRA BOT - Multi Channel Voting Bot",
   "main": "server.js",
   "scripts": {
     "start": "node server.js"
