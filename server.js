@@ -7,10 +7,8 @@ const app = express();
 app.use(express.json({ limit: "1mb" }));
 
 const PORT = process.env.PORT || 10000;
-
 const BOT_TOKEN = process.env.TELEGRAM_BOT_TOKEN;
 const APP_URL = (process.env.APP_URL || "").replace(/\/+$/, "");
-
 const SUPABASE_URL = (process.env.SUPABASE_URL || "").replace(/\/+$/, "");
 const SUPABASE_SECRET_KEY = process.env.SUPABASE_SECRET_KEY;
 
@@ -28,10 +26,13 @@ const WEBHOOK_SECRET = crypto
   .digest("hex");
 
 const bot = new Telegraf(BOT_TOKEN);
+const sessions = new Map();
 
-// ===============================
-// SUPABASE CONNECTION
-// ===============================
+let botInfo = null;
+
+// =====================================
+// SUPABASE RPC
+// =====================================
 
 async function supabaseRpc(functionName, params = {}) {
   const response = await fetch(
@@ -50,22 +51,16 @@ async function supabaseRpc(functionName, params = {}) {
   const result = await response.text();
 
   if (!response.ok) {
-    console.error(
-      "Supabase RPC Error:",
-      functionName,
-      response.status,
-      result
-    );
-
+    console.error("Supabase RPC:", functionName, response.status, result);
     throw new Error("DATABASE_ERROR");
   }
 
   return result ? JSON.parse(result) : null;
 }
 
-// ===============================
-// KEYBOARDS
-// ===============================
+// =====================================
+// MENUS
+// =====================================
 
 function ownerKeyboard() {
   return Markup.keyboard([
@@ -90,76 +85,353 @@ function userKeyboard() {
   ]).resize();
 }
 
-// ===============================
-// START COMMAND
-// ===============================
+function isOwner(ctx) {
+  return String(ctx.from?.id) === OWNER_ID;
+}
 
-bot.start(async (ctx) => {
+async function showMainMenu(ctx) {
+  sessions.delete(String(ctx.from.id));
+
+  if (isOwner(ctx)) {
+    return ctx.reply(
+      `👑 ${BOT_NAME}\n\nOwner Panel`,
+      ownerKeyboard()
+    );
+  }
+
+  return ctx.reply(
+    `👋 ${BOT_NAME} mein aapka swagat hai!\n\nApna menu select karein.`,
+    userKeyboard()
+  );
+}
+
+// =====================================
+// CHANNEL INPUT HELPER
+// =====================================
+
+function normalizeChannelInput(value) {
+  let input = String(value || "").trim();
+
+  if (/^https?:\/\/(www\.)?t\.me\//i.test(input)) {
+    try {
+      const url = new URL(input);
+      const slug = url.pathname.split("/").filter(Boolean)[0];
+
+      if (!slug || slug.startsWith("+") || slug === "c") {
+        return null;
+      }
+
+      return "@" + slug.replace(/^@/, "");
+    } catch {
+      return null;
+    }
+  }
+
+  if (input.startsWith("@")) return input;
+
+  if (/^-100\d+$/.test(input) || /^\d+$/.test(input)) {
+    return input;
+  }
+
+  return null;
+}
+
+// =====================================
+// ADD CHANNEL
+// =====================================
+
+async function startAddChannel(ctx) {
+  if (!isOwner(ctx)) {
+    return ctx.reply("❌ Sirf Owner channel add kar sakta hai.");
+  }
+
+  sessions.set(String(ctx.from.id), {
+    action: "add_channel",
+    step: "channel_input"
+  });
+
+  return ctx.reply(
+    "➕ ADD CHANNEL\n\n" +
+    "Channel ka @username ya Telegram Channel ID bhejein.\n\n" +
+    "Example: @mychannel\n\n" +
+    "Bot ko pehle channel mein Admin banana zaroori hai.\n\n" +
+    "Cancel karne ke liye /cancel bhejein."
+  );
+}
+
+async function processAddChannel(ctx, session, text) {
+  const channelInput = normalizeChannelInput(text);
+
+  if (!channelInput) {
+    return ctx.reply(
+      "❌ Channel details sahi nahi hain.\n\n" +
+      "@username ya valid Telegram Channel ID bhejein."
+    );
+  }
+
+  await ctx.reply("🔍 Channel verify ho raha hai...");
+
   try {
-    const telegramId = String(ctx.from.id);
+    const chat = await bot.telegram.getChat(channelInput);
 
-    if (telegramId === OWNER_ID) {
+    if (chat.type !== "channel") {
       return ctx.reply(
-        `👑 Welcome to ${BOT_NAME}!\n\nOwner Panel`,
+        "❌ Ye Telegram channel nahi hai. Kripya channel ka username ya ID bhejein."
+      );
+    }
+
+    const member = await bot.telegram.getChatMember(
+      chat.id,
+      botInfo.id
+    );
+
+    const isAdmin =
+      member.status === "administrator" ||
+      member.status === "creator";
+
+    if (!isAdmin) {
+      return ctx.reply(
+        "❌ Bot abhi is channel ka Admin nahi hai.\n\n" +
+        "Pehle @PAPA_SAI_PANGA_BOT ko channel mein Admin banayein. " +
+        "Uske baad dobara channel details bhejein."
+      );
+    }
+
+    const channelName = chat.title || "Unnamed Channel";
+    const channelUsername = chat.username
+      ? "@" + chat.username
+      : null;
+
+    const channelLink = chat.username
+      ? `https://t.me/${chat.username}`
+      : chat.invite_link || null;
+
+    const result = await supabaseRpc("add_bot_channel", {
+      p_owner_telegram_id: String(ctx.from.id),
+      p_channel_id: String(chat.id),
+      p_channel_name: channelName,
+      p_channel_username: channelUsername,
+      p_channel_link: channelLink
+    });
+
+    if (!result?.ok) {
+      if (result?.error === "CHANNEL_ALREADY_EXISTS") {
+        sessions.delete(String(ctx.from.id));
+        return ctx.reply("⚠️ Ye channel pehle se add hai.");
+      }
+
+      return ctx.reply(
+        result?.message || "❌ Channel add nahi ho saka."
+      );
+    }
+
+    await supabaseRpc("set_channel_bot_admin_status", {
+      p_owner_telegram_id: String(ctx.from.id),
+      p_channel_id: result.channel_db_id,
+      p_is_admin: true
+    });
+
+    sessions.delete(String(ctx.from.id));
+
+    return ctx.reply(
+      "✅ CHANNEL SUCCESSFULLY ADDED!\n\n" +
+      `📢 Name: ${channelName}\n` +
+      `🆔 Telegram ID: ${chat.id}\n` +
+      `👤 Username: ${channelUsername || "Private Channel"}\n` +
+      "🤖 Bot Admin: Yes\n\n" +
+      "Channel ab ZYNTRA BOT mein add ho gaya hai.",
+      ownerKeyboard()
+    );
+
+  } catch (error) {
+    console.error("Add channel error:", error);
+
+    return ctx.reply(
+      "❌ Channel verify nahi ho saka.\n\n" +
+      "Check karein:\n" +
+      "1. Channel ID/username sahi hai.\n" +
+      "2. Bot channel mein Admin hai.\n" +
+      "3. Bot ko channel access mila hua hai.\n\n" +
+      "Dobara channel details bhejein."
+    );
+  }
+}
+
+// =====================================
+// MANAGE CHANNELS
+// =====================================
+
+async function showManageChannels(ctx) {
+  if (!isOwner(ctx)) {
+    return ctx.reply("❌ Sirf Owner channels manage kar sakta hai.");
+  }
+
+  try {
+    const result = await supabaseRpc("get_accessible_channels", {
+      p_telegram_id: String(ctx.from.id)
+    });
+
+    if (!result?.ok) {
+      return ctx.reply("❌ Channels load nahi ho sake.");
+    }
+
+    const channels = result.channels || [];
+
+    if (!channels.length) {
+      return ctx.reply(
+        "📢 Abhi koi channel add nahi hai.\n\n" +
+        "Add Channel button se pehla channel add karein.",
         ownerKeyboard()
       );
     }
 
-    return ctx.reply(
-      `👋 ZYNTRA BOT mein aapka swagat hai!\n\nApna menu select karein.`,
-      userKeyboard()
-    );
+    let message = "📢 MANAGE CHANNELS\n\n";
+    message += `Total Channels: ${channels.length}\n\n`;
+
+    for (let i = 0; i < channels.length; i++) {
+      const channel = channels[i];
+
+      message += `${i + 1}. ${channel.channel_name}\n`;
+      message += `🆔 ID: ${channel.channel_id}\n`;
+      message += `👤 Username: ${channel.channel_username || "Private"}\n`;
+      message += `🤖 Bot Admin: ${channel.bot_is_admin ? "Yes" : "No"}\n`;
+      message += `📌 Status: ${channel.is_active ? "Active" : "Inactive"}\n`;
+
+      if (channel.channel_link) {
+        message += `🔗 ${channel.channel_link}\n`;
+      }
+
+      message += "\n";
+    }
+
+    return ctx.reply(message, ownerKeyboard());
 
   } catch (error) {
-    console.error("Start error:", error);
+    console.error("Manage channels error:", error);
 
-    await ctx.reply(
-      "Kuch dikkat aa gayi. Kripya dobara try karein."
+    return ctx.reply(
+      "❌ Channels load karte waqt error aa gaya."
     );
   }
-});
+}
 
-// ===============================
-// MENU COMMAND
-// ===============================
+// =====================================
+// START / CANCEL
+// =====================================
+
+bot.start(async (ctx) => {
+  await showMainMenu(ctx);
+});
 
 bot.command("menu", async (ctx) => {
-  if (String(ctx.from.id) === OWNER_ID) {
-    return ctx.reply("👑 Owner Panel", ownerKeyboard());
-  }
-
-  return ctx.reply("ZYNTRA BOT Menu", userKeyboard());
+  await showMainMenu(ctx);
 });
 
-// ===============================
-// BOT INFORMATION
-// ===============================
+bot.command("cancel", async (ctx) => {
+  sessions.delete(String(ctx.from.id));
 
-bot.command("about", async (ctx) => {
-  await ctx.reply(
-    `🤖 ${BOT_NAME}\n\n` +
-    `Username: @${BOT_USERNAME}\n` +
-    `Multi-Channel Voting Platform`
+  return ctx.reply(
+    "❌ Current action cancel kar diya gaya.",
+    isOwner(ctx) ? ownerKeyboard() : userKeyboard()
   );
 });
 
-// ===============================
-// BASIC ERROR HANDLING
-// ===============================
+// =====================================
+// TEXT BUTTON HANDLERS
+// =====================================
+
+bot.on("text", async (ctx) => {
+  const text = ctx.message.text.trim();
+  const userId = String(ctx.from.id);
+
+  if (text.startsWith("/")) return;
+
+  const session = sessions.get(userId);
+
+  if (session) {
+    if (session.action === "add_channel") {
+      if (!isOwner(ctx)) {
+        sessions.delete(userId);
+        return ctx.reply("❌ Permission denied.");
+      }
+
+      return processAddChannel(ctx, session, text);
+    }
+  }
+
+  if (text === "Add Channel") {
+    return startAddChannel(ctx);
+  }
+
+  if (text === "Manage Channels") {
+    return showManageChannels(ctx);
+  }
+
+  if (text === "Bot Status" && isOwner(ctx)) {
+    try {
+      const me = await bot.telegram.getMe();
+      const webhook = await bot.telegram.getWebhookInfo();
+
+      return ctx.reply(
+        "🤖 ZYNTRA BOT STATUS\n\n" +
+        `Name: ${BOT_NAME}\n` +
+        `Username: @${me.username}\n` +
+        `Webhook: ${webhook.url ? "Active" : "Inactive"}\n` +
+        `Pending Updates: ${webhook.pending_update_count || 0}\n` +
+        `Database: Connected configuration`
+      );
+    } catch (error) {
+      console.error("Bot status error:", error);
+      return ctx.reply("❌ Bot status check nahi ho saka.");
+    }
+  }
+
+  const implementedButtons = [
+    "Add Channel",
+    "Manage Channels",
+    "Bot Status"
+  ];
+
+  if (isOwner(ctx) && !implementedButtons.includes(text)) {
+    return ctx.reply(
+      "⏳ Ye feature abhi implement nahi hua hai.\n\n" +
+      "Iska actual function agle development step mein add hoga.",
+      ownerKeyboard()
+    );
+  }
+
+  if (!isOwner(ctx)) {
+    return ctx.reply(
+      "⏳ Ye feature abhi available nahi hai.\n\n" +
+      "Kripya baad mein try karein.",
+      userKeyboard()
+    );
+  }
+});
+
+// =====================================
+// ERROR HANDLER
+// =====================================
 
 bot.catch((error, ctx) => {
   console.error("Telegram update error:", error);
+
+  if (ctx?.chat) {
+    ctx.reply(
+      "Kuch technical dikkat aa gayi. Dobara try karein."
+    ).catch(() => {});
+  }
 });
 
-// ===============================
+// =====================================
 // EXPRESS ROUTES
-// ===============================
+// =====================================
 
 app.get("/", (_req, res) => {
   res.json({
     ok: true,
     name: BOT_NAME,
-    username: BOT_USERNAME,
+    username: "@" + BOT_USERNAME,
     service: "Multi-Channel Voting Bot",
     mode: "Webhook"
   });
@@ -168,15 +440,10 @@ app.get("/", (_req, res) => {
 app.get("/health", (_req, res) => {
   res.json({
     ok: true,
-    bot: BOT_NAME,
-    webhook: "configured",
-    database: "configured"
+    name: BOT_NAME,
+    mode: "webhook"
   });
 });
-
-// ===============================
-// TELEGRAM WEBHOOK
-// ===============================
 
 app.use(
   bot.webhookCallback("/telegram/webhook", {
@@ -184,19 +451,19 @@ app.use(
   })
 );
 
-// ===============================
-// START SERVER AND WEBHOOK
-// ===============================
+// =====================================
+// START SERVER
+// =====================================
 
 const server = app.listen(PORT, async () => {
-  console.log(`${BOT_NAME} server running on port ${PORT}`);
+  console.log(`${BOT_NAME} running on port ${PORT}`);
 
   try {
-    const me = await bot.telegram.getMe();
+    botInfo = await bot.telegram.getMe();
 
-    if (me.username !== BOT_USERNAME) {
+    if (botInfo.username !== BOT_USERNAME) {
       throw new Error(
-        `Bot username mismatch: expected @${BOT_USERNAME}, received @${me.username}`
+        `Username mismatch: @${botInfo.username}`
       );
     }
 
@@ -213,21 +480,17 @@ const server = app.listen(PORT, async () => {
       }
     );
 
-    console.log(`Webhook active: @${me.username}`);
+    console.log(`Webhook active: @${botInfo.username}`);
     console.log(`${BOT_NAME} is ready`);
 
   } catch (error) {
-    console.error("Webhook setup failed:", error.message);
+    console.error("Startup error:", error.message);
     server.close(() => process.exit(1));
   }
 });
 
-// ===============================
-// GRACEFUL SHUTDOWN
-// ===============================
-
 process.on("SIGTERM", () => {
   server.close(() => {
-    console.log(`${BOT_NAME} server stopped`);
+    console.log(`${BOT_NAME} stopped`);
   });
 });
