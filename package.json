@@ -1,16 +1,13 @@
-
 {
-  "name": "papa-sai-voting-bot",
+  "name": "demons-voting-bot",
   "version": "1.0.0",
-  "description": "DEMONS VOTING BOT",
+  "description": "DEMONS multi-channel Telegram voting bot",
   "main": "server.js",
   "scripts": {
     "start": "node server.js"
   },
   "dependencies": {
-    "@supabase/supabase-js": "^2.57.0",
     "express": "^5.1.0",
-    "telegraf": "^4.16.3",
-    "qrcode": "^1.5.4"
+    "telegraf": "^4.16.3"
   }
 }
